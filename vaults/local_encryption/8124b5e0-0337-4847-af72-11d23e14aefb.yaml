@@ -1,7 +1,0 @@
-id: 8124b5e0-0337-4847-af72-11d23e14aefb
-name: x402-test-secrets
-type: local_encryption
-config:
-  auto_generate: true
-  base_dir: /Users/sntxrr/git/swamp-extensions/cloudflare-x402
-createdAt: '2026-07-18T17:37:45.659Z'
