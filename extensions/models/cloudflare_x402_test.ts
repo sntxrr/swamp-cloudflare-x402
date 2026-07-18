@@ -63,7 +63,7 @@ Deno.test("probe records payment requirements from a 402", async () => {
       ),
     async () => {
       await model.methods.probe.execute(
-        { url: "https://api.example.com/paid", method: "GET", requestId: "latest" },
+        { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
         context,
       );
     },
@@ -86,7 +86,7 @@ Deno.test("probe records no-payment when resource is free", async () => {
     () => Promise.resolve(Response.json({ ok: true }, { status: 200 })),
     async () => {
       await model.methods.probe.execute(
-        { url: "https://api.example.com/free", method: "GET", requestId: "latest" },
+        { url: "https://api.example.com/free", method: "GET", requestId: "current" },
         context,
       );
     },
@@ -127,7 +127,7 @@ Deno.test("pay signs, retries with X-PAYMENT, and stores the receipt", async () 
     },
     async () => {
       await model.methods.pay.execute(
-        { url: "https://api.example.com/paid", method: "GET", requestId: "latest" },
+        { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
         context,
       );
     },
@@ -160,7 +160,7 @@ Deno.test("pay refuses when the price exceeds the ceiling", async () => {
       await assertRejects(
         () =>
           model.methods.pay.execute(
-            { url: "https://api.example.com/paid", method: "GET", requestId: "latest" },
+            { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
             context,
           ),
         Error,
@@ -180,7 +180,7 @@ Deno.test("pay records paid=false when no challenge is issued", async () => {
     () => Promise.resolve(Response.json({ free: true }, { status: 200 })),
     async () => {
       await model.methods.pay.execute(
-        { url: "https://api.example.com/free", method: "GET", requestId: "latest" },
+        { url: "https://api.example.com/free", method: "GET", requestId: "current" },
         context,
       );
     },
@@ -207,7 +207,7 @@ Deno.test("pay throws when no settleable exact/EVM option is offered", async () 
       await assertRejects(
         () =>
           model.methods.pay.execute(
-            { url: "https://api.example.com/paid", method: "GET", requestId: "latest" },
+            { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
             context,
           ),
         Error,

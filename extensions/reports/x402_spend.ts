@@ -30,6 +30,7 @@ type Logger = {
 type ModelReportContext = {
   modelType: string;
   modelId: string;
+  definition?: { name?: string };
   logger: Logger;
   dataRepository: {
     findAllForModel: (
@@ -102,6 +103,7 @@ export const report = {
   execute: async (
     context: ModelReportContext,
   ): Promise<{ markdown: string; json: Record<string, unknown> }> => {
+    const modelName = context.definition?.name ?? context.modelId;
     const payments = await loadPayments(context);
     const paid = payments.filter((p) => p.paid);
     const unpaid = payments.length - paid.length;
@@ -137,7 +139,7 @@ export const report = {
     );
 
     const lines: string[] = [];
-    lines.push(`## x402 spend summary — ${context.modelId}`);
+    lines.push(`## x402 spend summary — ${modelName}`);
     lines.push("");
     if (paid.length === 0) {
       lines.push(
@@ -198,7 +200,7 @@ export const report = {
     return {
       markdown: lines.join("\n") + "\n",
       json: {
-        model: context.modelId,
+        model: modelName,
         paidRequests: paid.length,
         unpaidRequests: unpaid,
         totalUsdc: Number(totalUsdc.toFixed(6)),

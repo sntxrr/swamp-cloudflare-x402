@@ -53,12 +53,12 @@ swamp model method run my-wallet probe --input url=https://api.example.com/paid-
 ```
 
 Optional inputs: `method` (default `GET`), `headers`, and `requestId` (stored
-instance name, default `latest`).
+instance name, default `current`; the name `latest` is reserved by swamp).
 
 The result is written to the `quote` resource:
 
 ```bash
-swamp data get my-wallet --name latest --json
+swamp data get my-wallet --name current --json
 ```
 
 It records `paymentRequired`, the raw `accepts` options (scheme, network,
@@ -84,7 +84,7 @@ body (capped at 64 KiB), and a `receipt` with the settlement `success`,
 `transaction` hash, `network`, and `payer`:
 
 ```bash
-swamp data get my-wallet --name latest --json
+swamp data get my-wallet --name current --json
 ```
 
 If the resource returns a normal `2xx` (no challenge), nothing is paid and

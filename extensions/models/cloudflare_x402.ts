@@ -114,8 +114,8 @@ const ProbeArgsSchema = z.object({
   url: z.string().url(),
   method: z.enum(HTTP_METHODS).default("GET"),
   headers: z.record(z.string(), z.string()).optional(),
-  requestId: z.string().default("latest").describe(
-    "Instance name for the stored quote — use distinct values to keep separate quotes.",
+  requestId: z.string().default("current").describe(
+    "Instance name for the stored quote — use distinct values to keep separate quotes. Avoid the reserved name 'latest'.",
   ),
 });
 
@@ -131,8 +131,8 @@ const PayArgsSchema = z.object({
   maxAmountUsdc: z.number().positive().optional().describe(
     "Override the model's default per-request ceiling for this call.",
   ),
-  requestId: z.string().default("latest").describe(
-    "Instance name for the stored payment record — use distinct values to keep separate receipts.",
+  requestId: z.string().default("current").describe(
+    "Instance name for the stored payment record — use distinct values to keep separate receipts. Avoid the reserved name 'latest'.",
   ),
 });
 
@@ -334,7 +334,7 @@ function decodePaymentResponse(
  */
 export const model = {
   type: "@sntxrr/cloudflare-x402",
-  version: "2026.07.17.1",
+  version: "2026.07.18.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     "payment": {

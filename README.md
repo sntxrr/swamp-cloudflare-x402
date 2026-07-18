@@ -42,7 +42,7 @@ swamp model create @sntxrr/cloudflare-x402 my-wallet \
 # Check the price, then pay
 swamp model method run my-wallet probe --input url=https://api.example.com/paid-tool
 swamp model method run my-wallet pay   --input url=https://api.example.com/paid-tool
-swamp data get my-wallet --name latest --json
+swamp data get my-wallet --name current --json
 ```
 
 Full method reference, global arguments, supported networks, and safety notes
