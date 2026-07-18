@@ -92,6 +92,22 @@ If the resource returns a normal `2xx` (no challenge), nothing is paid and
 `exact` EVM option is offered on a supported network, the method fails before any
 authorization is signed.
 
+## Reports
+
+### `@sntxrr/x402-spend`
+
+A model-scope report bundled with this extension. It runs automatically after
+the wallet model's method executions and summarizes spend from the stored
+`payment` receipts: total USDC, a per-network and per-resource breakdown, the
+on-chain settlement rate, and counts of unpaid / unconfirmed requests.
+
+```bash
+swamp report get @sntxrr/x402-spend --model my-wallet --json
+```
+
+Its labels are `payments`, `finops`, and `x402`; skip it for a run with
+`--skip-report @sntxrr/x402-spend`.
+
 ## Supported networks
 
 EVM "exact" scheme on: `base`, `base-sepolia`, `avalanche`, `avalanche-fuji`,

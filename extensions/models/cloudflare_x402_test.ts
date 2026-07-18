@@ -6,6 +6,7 @@ import {
 } from "jsr:@swamp-club/swamp-testing";
 import { model } from "./cloudflare_x402.ts";
 
+
 type ProbeContext = Parameters<typeof model.methods.probe.execute>[1];
 type PayContext = Parameters<typeof model.methods.pay.execute>[1];
 
@@ -217,3 +218,4 @@ Deno.test("pay throws when no settleable exact/EVM option is offered", async () 
 
   assertEquals(getWrittenResources().length, 0);
 });
+

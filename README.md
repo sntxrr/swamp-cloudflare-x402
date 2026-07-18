@@ -11,6 +11,13 @@ EIP-3009 `TransferWithAuthorization` — only the signed authorization ever leav
 the process, and settlement happens on-chain through the resource server's
 facilitator.
 
+## Contents
+
+| Kind       | Name                                                        | Description                                                                        |
+| ---------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| **Model**  | [`@sntxrr/cloudflare-x402`](extensions/models/cloudflare_x402.ts) | Pay for and probe x402-protected resources with a local EVM wallet.          |
+| **Report** | [`@sntxrr/x402-spend`](extensions/reports/x402_spend.ts)    | Model-scope spend summary — total USDC, per-network/per-resource, settlement rate. |
+
 ## Model: `@sntxrr/cloudflare-x402`
 
 | Method  | What it does                                                                    |
@@ -39,7 +46,38 @@ swamp data get my-wallet --name latest --json
 ```
 
 Full method reference, global arguments, supported networks, and safety notes
-live in [`extensions/models/README.md`](extensions/models/README.md).
+live in [`extensions/README.md`](extensions/README.md).
+
+## Reports
+
+### `@sntxrr/x402-spend`
+
+A model-scope report that summarizes payment activity for a wallet. It runs
+automatically after `@sntxrr/cloudflare-x402` method executions (reading the
+stored `payment` receipts) and can be fetched on demand:
+
+```bash
+swamp report get @sntxrr/x402-spend --model my-wallet            # terminal view
+swamp report get @sntxrr/x402-spend --model my-wallet --markdown # raw markdown
+swamp report get @sntxrr/x402-spend --model my-wallet --json     # structured
+```
+
+It reports total USDC spent, a per-network and per-resource breakdown, the
+on-chain settlement rate, and counts of unpaid / unconfirmed requests. Example:
+
+```
+## x402 spend summary — my-wallet
+
+**18** paid request(s) · **3.4200 USDC** total · **100%** settled on-chain
+
+| Network      | Requests |   USDC |
+| ------------ | -------: | -----: |
+| base         |       11 | 2.1000 |
+| base-sepolia |        7 | 1.3200 |
+```
+
+Skip it for a run with `--skip-report @sntxrr/x402-spend`, or filter by its
+labels (`payments`, `finops`, `x402`).
 
 ## Supported networks
 
@@ -51,11 +89,11 @@ holds real funds.
 ## Development
 
 ```bash
-deno test --allow-net extensions/models/cloudflare_x402_test.ts   # unit tests
-swamp extension quality extensions/models/manifest.yaml           # quality score
-swamp extension push    extensions/models/manifest.yaml --dry-run # publish check
+deno test --allow-net extensions/models/ extensions/reports/  # unit tests
+swamp extension quality extensions/manifest.yaml              # quality score
+swamp extension push    extensions/manifest.yaml --dry-run    # publish check
 ```
 
 ## License
 
-[MIT](extensions/models/LICENSE.md)
+[MIT](extensions/LICENSE.md)

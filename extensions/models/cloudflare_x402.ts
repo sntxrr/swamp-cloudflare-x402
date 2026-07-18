@@ -577,4 +577,5 @@ export const model = {
       },
     },
   },
+  reports: ["@sntxrr/x402-spend"],
 };
