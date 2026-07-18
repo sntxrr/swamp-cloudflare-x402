@@ -36,7 +36,7 @@ const NETWORK_CHAIN_IDS: Record<string, number> = {
 const DEFAULT_TOKEN_DECIMALS = 6;
 
 const GlobalArgsSchema = z.object({
-  privateKey: z.string().regex(
+  privateKey: z.string().meta({ sensitive: true }).regex(
     /^0x[0-9a-fA-F]{64}$/,
     "must be a 0x-prefixed 32-byte hex EVM private key",
   ).describe(
@@ -104,6 +104,9 @@ const PaymentSchema = z.object({
   responseBody: z.string().describe(
     "Response body of the paid request (truncated to 64 KiB).",
   ),
+  responseTruncated: z.boolean().describe(
+    "True when responseBody was capped at 64 KiB.",
+  ),
   paidAt: z.string(),
 });
 
@@ -164,11 +167,17 @@ function toUsdc(base: string, decimals: number): number | undefined {
 }
 
 /** Read a response body as text, capped at MAX_BODY_BYTES. */
-async function readCappedBody(res: Response): Promise<string> {
+async function readCappedBody(
+  res: Response,
+): Promise<{ body: string; truncated: boolean }> {
   const text = await res.text();
-  return text.length > MAX_BODY_BYTES
-    ? text.slice(0, MAX_BODY_BYTES) + "\n…[truncated]"
-    : text;
+  if (text.length > MAX_BODY_BYTES) {
+    return {
+      body: text.slice(0, MAX_BODY_BYTES) + "\n…[truncated]",
+      truncated: true,
+    };
+  }
+  return { body: text, truncated: false };
 }
 
 /** Normalize the `accepts` array from a 402 body into typed requirements. */
@@ -423,7 +432,7 @@ export const model = {
         });
 
         if (challenge.status !== 402) {
-          const body = await readCappedBody(challenge);
+          const { body, truncated } = await readCappedBody(challenge);
           const handle = await context.writeResource(
             "payment",
             args.requestId,
@@ -439,6 +448,7 @@ export const model = {
               receipt: null,
               responseContentType: challenge.headers.get("content-type"),
               responseBody: body,
+              responseTruncated: truncated,
               paidAt: new Date().toISOString(),
             },
           );
@@ -531,7 +541,8 @@ export const model = {
         const receipt = decodePaymentResponse(
           paidRes.headers.get("x-payment-response"),
         );
-        const responseBody = await readCappedBody(paidRes);
+        const { body: responseBody, truncated: responseTruncated } =
+          await readCappedBody(paidRes);
 
         if (!paidRes.ok) {
           throw new Error(
@@ -551,6 +562,7 @@ export const model = {
           receipt,
           responseContentType: paidRes.headers.get("content-type"),
           responseBody,
+          responseTruncated,
           paidAt: new Date().toISOString(),
         });
 
