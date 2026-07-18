@@ -114,6 +114,39 @@ EVM "exact" scheme on: `base`, `base-sepolia`, `avalanche`, `avalanche-fuji`,
 `polygon`, `polygon-amoy`, `sei`, `sei-testnet`. The network is chosen from the
 server's advertised `accepts` list; unsupported networks are skipped.
 
+## Testing
+
+**Unit tests** (mocked fetch and report contexts — no network, no wallet):
+
+```bash
+deno test --allow-net extensions/models/ extensions/reports/
+```
+
+**End-to-end, no crypto or cost** — the repo ships a local mock x402 server
+([`examples/mock_x402_server.ts`](https://github.com/sntxrr/swamp-cloudflare-x402/blob/main/examples/mock_x402_server.ts))
+that issues a real `402` challenge and settles a mock payment, exercising the
+full flow (EIP-712 signing, `X-PAYMENT`, receipt decode):
+
+```bash
+deno run --allow-net examples/mock_x402_server.ts &          # start on :4021
+
+KEY="0x$(openssl rand -hex 32)"                              # throwaway wallet
+swamp vault create local_encryption x402-test-secrets
+echo "$KEY" | swamp vault put x402-test-secrets EVM_PRIVATE_KEY
+swamp model create @sntxrr/cloudflare-x402 x402-tester \
+  --global-arg 'privateKey=${{ vault.get(x402-test-secrets, EVM_PRIVATE_KEY) }}' \
+  --global-arg maxAmountUsdc=1.0
+
+swamp model method run x402-tester probe --input url=http://localhost:4021/paid
+swamp model method run x402-tester pay   --input url=http://localhost:4021/paid
+swamp report get @sntxrr/x402-spend --model x402-tester --markdown
+swamp model delete x402-tester --force                       # clean up
+```
+
+**Real testnet** — point `pay` at a live `base-sepolia` endpoint with a wallet
+funded from the [Circle USDC faucet](https://faucet.circle.com/). The `exact`
+scheme is gasless for the payer, so only test USDC is needed (no testnet ETH).
+
 ## Safety notes
 
 - The wallet holds real funds — scope `maxAmountUsdc` tightly and keep the key in

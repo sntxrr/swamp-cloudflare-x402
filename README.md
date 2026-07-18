@@ -86,12 +86,65 @@ EVM "exact" scheme on `base`, `base-sepolia`, `avalanche`, `avalanche-fuji`,
 (`base-sepolia`) with test USDC before pointing at mainnet resources — the wallet
 holds real funds.
 
+## Testing
+
+### Unit tests
+
+Run the model and report unit tests (mocked fetch and report contexts — no
+network, no wallet):
+
+```bash
+deno test --allow-net extensions/models/ extensions/reports/
+```
+
+### End-to-end against a local mock server (no crypto, no cost)
+
+[`examples/mock_x402_server.ts`](examples/mock_x402_server.ts) is a tiny local
+resource server that issues a real `402` challenge (USDC "exact" scheme on
+`base-sepolia`) and "settles" a mock payment — so you can exercise the full flow
+(real EIP-712 signing, the `X-PAYMENT` header, receipt decode) without a
+blockchain or any funds.
+
+```bash
+# 1. Start the mock server (defaults to port 4021)
+deno run --allow-net examples/mock_x402_server.ts &
+
+# 2. Create a throwaway wallet (mock/testnet only — never fund it) and vault it
+KEY="0x$(openssl rand -hex 32)"
+swamp vault create local_encryption x402-test-secrets
+echo "$KEY" | swamp vault put x402-test-secrets EVM_PRIVATE_KEY
+
+# 3. Create a wallet-backed model
+swamp model create @sntxrr/cloudflare-x402 x402-tester \
+  --global-arg 'privateKey=${{ vault.get(x402-test-secrets, EVM_PRIVATE_KEY) }}' \
+  --global-arg maxAmountUsdc=1.0
+
+# 4. Probe (no payment), then pay (signs + settles)
+swamp model method run x402-tester probe --input url=http://localhost:4021/paid
+swamp model method run x402-tester pay   --input url=http://localhost:4021/paid
+swamp data get x402-tester --name current --json
+
+# 5. See the spend report, then clean up
+swamp report get @sntxrr/x402-spend --model x402-tester --markdown
+swamp model delete x402-tester --force
+```
+
+A successful `pay` logs `Paid request settled (true)` and stores a receipt with
+the (mock) transaction hash, network, and payer address.
+
+### Real testnet (on-chain settlement)
+
+To see an actual on-chain settlement, point `pay` at a live `base-sepolia` x402
+endpoint using a wallet funded with test USDC from the
+[Circle faucet](https://faucet.circle.com/). The `exact` scheme is gasless for
+the payer (the facilitator submits the transfer), so you only need test USDC,
+not testnet ETH.
+
 ## Development
 
 ```bash
-deno test --allow-net extensions/models/ extensions/reports/  # unit tests
-swamp extension quality extensions/manifest.yaml              # quality score
-swamp extension push    extensions/manifest.yaml --dry-run    # publish check
+swamp extension quality extensions/manifest.yaml           # quality score (14/14)
+swamp extension push    extensions/manifest.yaml --dry-run # publish check
 ```
 
 ## License
