@@ -334,7 +334,7 @@ function decodePaymentResponse(
  */
 export const model = {
   type: "@sntxrr/cloudflare-x402",
-  version: "2026.07.18.1",
+  version: "2026.07.18.2",
   globalArguments: GlobalArgsSchema,
   resources: {
     "payment": {
