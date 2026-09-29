@@ -114,8 +114,8 @@ const ProbeArgsSchema = z.object({
   url: z.string().url(),
   method: z.enum(HTTP_METHODS).default("GET"),
   headers: z.record(z.string(), z.string()).optional(),
-  requestId: z.string().default("current").describe(
-    "Instance name for the stored quote — use distinct values to keep separate quotes. Avoid the reserved name 'latest'.",
+  requestId: z.string().default("quote").describe(
+    "Instance name for the stored quote (default 'quote', distinct from pay's 'payment' so a probe never becomes the latest version of a payment). Use distinct values to keep separate quotes. Avoid the reserved name 'latest'.",
   ),
 });
 
@@ -131,8 +131,8 @@ const PayArgsSchema = z.object({
   maxAmountUsdc: z.number().positive().optional().describe(
     "Override the model's default per-request ceiling for this call.",
   ),
-  requestId: z.string().default("current").describe(
-    "Instance name for the stored payment record — use distinct values to keep separate receipts. Avoid the reserved name 'latest'.",
+  requestId: z.string().default("payment").describe(
+    "Instance name for the stored payment record (default 'payment', distinct from probe's 'quote'). Repeated pays on one name are kept as versions and all count toward spend. Avoid the reserved name 'latest'.",
   ),
 });
 
@@ -334,7 +334,7 @@ function decodePaymentResponse(
  */
 export const model = {
   type: "@sntxrr/cloudflare-x402",
-  version: "2026.07.18.2",
+  version: "2026.09.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     "payment": {
@@ -578,4 +578,12 @@ export const model = {
     },
   },
   reports: ["@sntxrr/x402-spend"],
+  upgrades: [
+    {
+      toVersion: "2026.09.29.1",
+      description:
+        "probe and pay default to separate data names ('quote' / 'payment') instead of sharing 'current'; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
 };

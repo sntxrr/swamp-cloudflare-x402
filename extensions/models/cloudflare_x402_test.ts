@@ -1,11 +1,14 @@
 // extensions/models/cloudflare_x402_test.ts
-import { assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert@1.0.19";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "jsr:@std/assert@1.0.19";
 import {
   createModelTestContext,
   withMockedFetch,
 } from "jsr:@swamp-club/swamp-testing";
 import { model } from "./cloudflare_x402.ts";
-
 
 type ProbeContext = Parameters<typeof model.methods.probe.execute>[1];
 type PayContext = Parameters<typeof model.methods.pay.execute>[1];
@@ -63,7 +66,11 @@ Deno.test("probe records payment requirements from a 402", async () => {
       ),
     async () => {
       await model.methods.probe.execute(
-        { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
+        {
+          url: "https://api.example.com/paid",
+          method: "GET",
+          requestId: "current",
+        },
         context,
       );
     },
@@ -86,7 +93,11 @@ Deno.test("probe records no-payment when resource is free", async () => {
     () => Promise.resolve(Response.json({ ok: true }, { status: 200 })),
     async () => {
       await model.methods.probe.execute(
-        { url: "https://api.example.com/free", method: "GET", requestId: "current" },
+        {
+          url: "https://api.example.com/free",
+          method: "GET",
+          requestId: "current",
+        },
         context,
       );
     },
@@ -127,7 +138,11 @@ Deno.test("pay signs, retries with X-PAYMENT, and stores the receipt", async () 
     },
     async () => {
       await model.methods.pay.execute(
-        { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
+        {
+          url: "https://api.example.com/paid",
+          method: "GET",
+          requestId: "current",
+        },
         context,
       );
     },
@@ -144,7 +159,10 @@ Deno.test("pay signs, retries with X-PAYMENT, and stores the receipt", async () 
   const data = getWrittenResources()[0].data;
   assertEquals(data.paid, true);
   assertEquals(data.amountUsdc, 0.01);
-  assertEquals((data.receipt as Record<string, unknown>).transaction, "0xabc123");
+  assertEquals(
+    (data.receipt as Record<string, unknown>).transaction,
+    "0xabc123",
+  );
   assertEquals((data.receipt as Record<string, unknown>).success, true);
 });
 
@@ -155,12 +173,17 @@ Deno.test("pay refuses when the price exceeds the ceiling", async () => {
   });
 
   await withMockedFetch(
-    () => Promise.resolve(Response.json(challengeBody("10000"), { status: 402 })),
+    () =>
+      Promise.resolve(Response.json(challengeBody("10000"), { status: 402 })),
     async () => {
       await assertRejects(
         () =>
           model.methods.pay.execute(
-            { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
+            {
+              url: "https://api.example.com/paid",
+              method: "GET",
+              requestId: "current",
+            },
             context,
           ),
         Error,
@@ -180,7 +203,11 @@ Deno.test("pay records paid=false when no challenge is issued", async () => {
     () => Promise.resolve(Response.json({ free: true }, { status: 200 })),
     async () => {
       await model.methods.pay.execute(
-        { url: "https://api.example.com/free", method: "GET", requestId: "current" },
+        {
+          url: "https://api.example.com/free",
+          method: "GET",
+          requestId: "current",
+        },
         context,
       );
     },
@@ -197,7 +224,13 @@ Deno.test("pay throws when no settleable exact/EVM option is offered", async () 
   const solanaOnly = {
     x402Version: 1,
     accepts: [
-      { scheme: "exact", network: "solana", maxAmountRequired: "10000", payTo: "abc", asset: "xyz" },
+      {
+        scheme: "exact",
+        network: "solana",
+        maxAmountRequired: "10000",
+        payTo: "abc",
+        asset: "xyz",
+      },
     ],
   };
 
@@ -207,7 +240,11 @@ Deno.test("pay throws when no settleable exact/EVM option is offered", async () 
       await assertRejects(
         () =>
           model.methods.pay.execute(
-            { url: "https://api.example.com/paid", method: "GET", requestId: "current" },
+            {
+              url: "https://api.example.com/paid",
+              method: "GET",
+              requestId: "current",
+            },
             context,
           ),
         Error,
@@ -219,3 +256,10 @@ Deno.test("pay throws when no settleable exact/EVM option is offered", async () 
   assertEquals(getWrittenResources().length, 0);
 });
 
+Deno.test("probe and pay default to different data names", () => {
+  const url = "https://api.example.com/paid";
+  const probe = model.methods.probe.arguments.parse({ url });
+  const pay = model.methods.pay.arguments.parse({ url });
+  assertEquals(probe.requestId, "quote");
+  assertEquals(pay.requestId, "payment");
+});

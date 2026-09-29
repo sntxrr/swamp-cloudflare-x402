@@ -1,8 +1,5 @@
 // extensions/reports/x402_spend_test.ts
-import {
-  assertEquals,
-  assertStringIncludes,
-} from "jsr:@std/assert@1.0.19";
+import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1.0.19";
 import { createReportTestContext } from "jsr:@swamp-club/swamp-testing";
 import { report } from "./x402_spend.ts";
 
@@ -11,7 +8,11 @@ type SpendReportContext = Parameters<typeof report.execute>[0];
 const MODEL_TYPE = "@sntxrr/cloudflare-x402";
 const MODEL_ID = "my-wallet";
 
-function paymentArtifact(name: string, rec: Record<string, unknown>) {
+function paymentArtifact(
+  name: string,
+  rec: Record<string, unknown>,
+  version = 1,
+) {
   const content = new TextEncoder().encode(JSON.stringify(rec));
   return {
     modelType: MODEL_TYPE,
@@ -20,7 +21,7 @@ function paymentArtifact(name: string, rec: Record<string, unknown>) {
       name,
       kind: "resource" as const,
       dataId: name,
-      version: 1,
+      version,
       size: content.length,
       contentType: "application/json",
     },
@@ -28,7 +29,9 @@ function paymentArtifact(name: string, rec: Record<string, unknown>) {
   };
 }
 
-function paidRecord(overrides: Record<string, unknown>): Record<string, unknown> {
+function paidRecord(
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
   return {
     url: "https://api.example.com/paid",
     method: "GET",
@@ -63,6 +66,25 @@ function ctx(dataArtifacts: ReturnType<typeof paymentArtifact>[]) {
     dataArtifacts,
   });
   return context as unknown as SpendReportContext;
+}
+
+/**
+ * Like ctx(), but findAllForModel lists only the latest version of each name,
+ * as swamp does (the test fake lists every version, which hid this bug).
+ */
+function latestOnlyCtx(dataArtifacts: ReturnType<typeof paymentArtifact>[]) {
+  const context = ctx(dataArtifacts);
+  const repo = context.dataRepository;
+  const findAll = repo.findAllForModel.bind(repo);
+  repo.findAllForModel = async (type: string, id: string) => {
+    const top = new Map<string, { name: string; version?: number }>();
+    for (const d of await findAll(type, id)) {
+      const prev = top.get(d.name);
+      if (!prev || (d.version ?? 0) > (prev.version ?? 0)) top.set(d.name, d);
+    }
+    return [...top.values()];
+  };
+  return context;
 }
 
 Deno.test("x402-spend aggregates paid records by network and resource", async () => {
@@ -104,7 +126,12 @@ Deno.test("x402-spend counts unpaid and unconfirmed settlements", async () => {
     paymentArtifact("a", paidRecord({ receipt: null })),
     paymentArtifact(
       "b",
-      paidRecord({ paid: false, network: null, amountUsdc: null, receipt: null }),
+      paidRecord({
+        paid: false,
+        network: null,
+        amountUsdc: null,
+        receipt: null,
+      }),
     ),
   ]));
 
@@ -120,4 +147,48 @@ Deno.test("x402-spend handles a wallet with no activity", async () => {
   assertEquals(result.json.paidRequests, 0);
   assertEquals(result.json.totalUsdc, 0);
   assertStringIncludes(result.markdown, "No x402 payment activity");
+});
+
+const quoteRecord = {
+  url: "https://api.example.com/paid",
+  method: "GET",
+  paymentRequired: true,
+  httpStatus: 402,
+  x402Version: 1,
+  accepts: [],
+  error: null,
+  fetchedAt: "2026-07-17T00:00:00Z",
+};
+
+Deno.test("x402-spend still counts a payment when a newer quote shares its name", async () => {
+  // Pre-2026.09.29.1 defaults wrote probe and pay to one name: v1 payment,
+  // then a later probe as v2. The payment must not vanish.
+  const result = await report.execute(latestOnlyCtx([
+    paymentArtifact("current", paidRecord({ amountUsdc: 0.01 }), 1),
+    paymentArtifact("current", quoteRecord, 2),
+  ]));
+
+  assertEquals(result.json.paidRequests, 1);
+  assertEquals(result.json.totalUsdc, 0.01);
+});
+
+Deno.test("x402-spend counts every retained version of one payment name", async () => {
+  const result = await report.execute(latestOnlyCtx([
+    paymentArtifact("payment", paidRecord({ amountUsdc: 0.01 }), 1),
+    paymentArtifact("payment", paidRecord({ amountUsdc: 0.02 }), 2),
+  ]));
+
+  assertEquals(result.json.paidRequests, 2);
+  assertEquals(result.json.totalUsdc, 0.03);
+});
+
+Deno.test("x402-spend stops at garbage-collected versions", async () => {
+  // Versions 1-2 were collected; only 3-4 remain.
+  const result = await report.execute(latestOnlyCtx([
+    paymentArtifact("payment", paidRecord({ amountUsdc: 0.01 }), 3),
+    paymentArtifact("payment", paidRecord({ amountUsdc: 0.02 }), 4),
+  ]));
+
+  assertEquals(result.json.paidRequests, 2);
+  assertEquals(result.json.totalUsdc, 0.03);
 });
