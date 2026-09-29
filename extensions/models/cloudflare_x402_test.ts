@@ -451,3 +451,72 @@ Deno.test("pay keeps the receipt when the paid response body stalls", async () =
     "0xabc",
   );
 });
+
+// Pays against a resource whose X-PAYMENT retry answers with `paidResponse`,
+// expecting pay to fail; returns what it wrote and how often it paid.
+async function payAgainstPaidError(paidResponse: () => Response) {
+  const { context, getWrittenResources } = payContext();
+  let paidAttempts = 0;
+  await withMockedFetch((req: Request) => {
+    if (!req.headers.get("X-PAYMENT")) {
+      return Promise.resolve(
+        Response.json(challengeBody("10000"), { status: 402 }),
+      );
+    }
+    paidAttempts += 1;
+    return Promise.resolve(paidResponse());
+  }, async () => {
+    await assertRejects(
+      () =>
+        model.methods.pay.execute(
+          {
+            url: "https://api.example.com/paid",
+            method: "GET",
+            requestId: "payment",
+          },
+          context,
+        ),
+      Error,
+      "the payment may have settled",
+    );
+  });
+  return { written: getWrittenResources(), paidAttempts };
+}
+
+Deno.test("pay records an error-status paid retry with its receipt", async () => {
+  const receipt = btoa(JSON.stringify({
+    success: true,
+    transaction: "0xmock",
+    network: "base-sepolia",
+    payer: "0x0",
+  }));
+  const { written, paidAttempts } = await payAgainstPaidError(() =>
+    new Response("upstream exploded", {
+      status: 500,
+      headers: { "x-payment-response": receipt },
+    })
+  );
+
+  assertEquals(paidAttempts, 1);
+  assertEquals(written.length, 1);
+  assertEquals(written[0].specName, "payment");
+  assertEquals(written[0].data.paid, true);
+  assertEquals(written[0].data.httpStatus, 500);
+  assertEquals(written[0].data.amountUsdc, 0.01);
+  assertEquals(written[0].data.responseBody, "upstream exploded");
+  assertEquals(
+    (written[0].data.receipt as Record<string, unknown>).transaction,
+    "0xmock",
+  );
+});
+
+Deno.test("pay records an error-status paid retry without a receipt", async () => {
+  const { written } = await payAgainstPaidError(() =>
+    new Response("bad gateway", { status: 502 })
+  );
+
+  assertEquals(written.length, 1);
+  assertEquals(written[0].data.paid, true);
+  assertEquals(written[0].data.httpStatus, 502);
+  assertEquals(written[0].data.receipt, null);
+});

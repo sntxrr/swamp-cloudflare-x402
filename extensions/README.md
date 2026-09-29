@@ -104,6 +104,12 @@ sent and the payment may have settled. The method still fails, but first writes 
 response arrived), which the spend report counts as an unconfirmed settlement.
 Check the payer's on-chain history before paying again.
 
+The same holds when the **paid** request answers with an error status (e.g. `500`):
+the method fails, but first writes the `payment` record with `paid: true`, the real
+`httpStatus`, the error body, and whatever `X-PAYMENT-RESPONSE` receipt came back
+(`null` if none). A receipt with `success: true` means the payment settled even
+though the resource errored, and the spend report counts it as spent.
+
 ## Reports
 
 ### `@sntxrr/x402-spend`

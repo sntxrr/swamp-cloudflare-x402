@@ -358,7 +358,7 @@ function decodePaymentResponse(
  */
 export const model = {
   type: "@sntxrr/cloudflare-x402",
-  version: "2026.09.29.2",
+  version: "2026.09.29.3",
   globalArguments: GlobalArgsSchema,
   resources: {
     "payment": {
@@ -648,12 +648,9 @@ export const model = {
           );
         }
 
-        if (!paidRes.ok) {
-          throw new Error(
-            `x402 payment retry failed with ${paidRes.status}: ${responseBody}`,
-          );
-        }
-
+        // Record before checking the status: an error response to the paid
+        // retry does not mean the payment failed to settle (the receipt may
+        // even say it did), so the evidence is kept either way.
         const handle = await context.writeResource("payment", args.requestId, {
           url: args.url,
           method: args.method,
@@ -669,6 +666,22 @@ export const model = {
           responseTruncated,
           paidAt: new Date().toISOString(),
         });
+
+        if (!paidRes.ok) {
+          logger.warn(
+            "Paid retry returned {status}; recorded as {name} (settled: {success})",
+            {
+              status: paidRes.status,
+              name: handle.name,
+              success: receipt?.success ?? "unknown",
+            },
+          );
+          throw new Error(
+            `x402 payment retry failed with ${paidRes.status}: ${responseBody} — the X-PAYMENT header was sent, so the payment may have settled. Recorded as paid in '${args.requestId}' (receipt: ${
+              receipt?.transaction ?? "none"
+            }); check the payer's on-chain history before retrying.`,
+          );
+        }
 
         logger.info(
           "Paid request settled ({success}) — tx {tx}",
@@ -693,6 +706,12 @@ export const model = {
       toVersion: "2026.09.29.2",
       description:
         "HTTP requests time out (new optional global argument timeoutSeconds, default 30 — no migration needed); a timed-out paid retry is recorded as paid with no receipt",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.29.3",
+      description:
+        "a paid retry that returns an error status is recorded as paid (with its status and any receipt) before the method fails; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
