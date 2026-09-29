@@ -263,3 +263,191 @@ Deno.test("probe and pay default to different data names", () => {
   assertEquals(probe.requestId, "quote");
   assertEquals(pay.requestId, "payment");
 });
+
+// A server that accepts the request and never answers: the returned promise
+// settles only when the request's signal aborts. The guard fails the test
+// (instead of hanging it) when no timeout signal was passed.
+function hangUntilAborted(req: Request): Promise<Response> {
+  return new Promise((_, reject) => {
+    const guard = setTimeout(
+      () => reject(new Error("request was never aborted")),
+      3000,
+    );
+    req.signal.addEventListener("abort", () => {
+      clearTimeout(guard);
+      reject(req.signal.reason);
+    }, { once: true });
+  });
+}
+
+// Headers arrive, then the body stalls until the request's signal aborts.
+function stalledBody(req: Request, init: ResponseInit): Response {
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  const body = new ReadableStream({
+    start(controller) {
+      guard = setTimeout(
+        () => controller.error(new Error("request was never aborted")),
+        3000,
+      );
+      req.signal.addEventListener("abort", () => {
+        clearTimeout(guard);
+        controller.error(req.signal.reason);
+      }, { once: true });
+    },
+  });
+  return new Response(body, init);
+}
+
+Deno.test("timeoutSeconds defaults to 30", () => {
+  assertEquals(
+    model.globalArguments.parse({ privateKey: TEST_KEY }).timeoutSeconds,
+    30,
+  );
+});
+
+Deno.test("probe times out a resource that never answers", async () => {
+  const { context, getWrittenResources } = probeContext();
+  await withMockedFetch(hangUntilAborted, async () => {
+    await assertRejects(
+      () =>
+        model.methods.probe.execute(
+          {
+            url: "https://api.example.com/hang",
+            method: "GET",
+            requestId: "quote",
+            timeoutSeconds: 1,
+          },
+          context,
+        ),
+      Error,
+      "Probe of https://api.example.com/hang timed out after 1s",
+    );
+  });
+  assertEquals(getWrittenResources().length, 0);
+});
+
+Deno.test("probe times out a 402 whose body never arrives", async () => {
+  const { context } = probeContext({ ...GLOBAL_ARGS, timeoutSeconds: 1 });
+  await withMockedFetch(
+    (req: Request) => Promise.resolve(stalledBody(req, { status: 402 })),
+    async () => {
+      await assertRejects(
+        () =>
+          model.methods.probe.execute(
+            {
+              url: "https://api.example.com/hang",
+              method: "GET",
+              requestId: "quote",
+            },
+            context,
+          ),
+        Error,
+        "timed out after 1s",
+      );
+    },
+  );
+});
+
+Deno.test("pay times out the challenge without paying or recording", async () => {
+  const { context, getWrittenResources } = payContext();
+  await withMockedFetch(hangUntilAborted, async () => {
+    await assertRejects(
+      () =>
+        model.methods.pay.execute(
+          {
+            url: "https://api.example.com/hang",
+            method: "GET",
+            requestId: "payment",
+            timeoutSeconds: 1,
+          },
+          context,
+        ),
+      Error,
+      "Payment challenge request to https://api.example.com/hang timed out after 1s",
+    );
+  });
+  assertEquals(getWrittenResources().length, 0);
+});
+
+Deno.test("pay records a timed-out paid retry as paid with no receipt", async () => {
+  const { context, getWrittenResources } = payContext();
+  let paidAttempts = 0;
+  await withMockedFetch((req: Request) => {
+    if (!req.headers.get("X-PAYMENT")) {
+      return Promise.resolve(
+        Response.json(challengeBody("10000"), { status: 402 }),
+      );
+    }
+    paidAttempts += 1;
+    return hangUntilAborted(req);
+  }, async () => {
+    await assertRejects(
+      () =>
+        model.methods.pay.execute(
+          {
+            url: "https://api.example.com/paid",
+            method: "GET",
+            requestId: "payment",
+            timeoutSeconds: 1,
+          },
+          context,
+        ),
+      Error,
+      "the payment may have settled",
+    );
+  });
+
+  assertEquals(paidAttempts, 1);
+  const written = getWrittenResources();
+  assertEquals(written.length, 1);
+  assertEquals(written[0].specName, "payment");
+  assertEquals(written[0].data.paid, true);
+  assertEquals(written[0].data.receipt, null);
+  assertEquals(written[0].data.httpStatus, 0);
+  assertEquals(written[0].data.amountUsdc, 0.01);
+});
+
+Deno.test("pay keeps the receipt when the paid response body stalls", async () => {
+  const { context, getWrittenResources } = payContext();
+  const receipt = btoa(JSON.stringify({
+    success: true,
+    transaction: "0xabc",
+    network: "base-sepolia",
+    payer: "0x0",
+  }));
+  await withMockedFetch((req: Request) => {
+    if (!req.headers.get("X-PAYMENT")) {
+      return Promise.resolve(
+        Response.json(challengeBody("10000"), { status: 402 }),
+      );
+    }
+    return Promise.resolve(stalledBody(req, {
+      status: 200,
+      headers: { "x-payment-response": receipt },
+    }));
+  }, async () => {
+    await assertRejects(
+      () =>
+        model.methods.pay.execute(
+          {
+            url: "https://api.example.com/paid",
+            method: "GET",
+            requestId: "payment",
+            timeoutSeconds: 1,
+          },
+          context,
+        ),
+      Error,
+      "timed out after 1s",
+    );
+  });
+
+  const written = getWrittenResources();
+  assertEquals(written.length, 1);
+  assertEquals(written[0].data.paid, true);
+  assertEquals(written[0].data.httpStatus, 200);
+  assertEquals(
+    (written[0].data.receipt as Record<string, unknown>).transaction,
+    "0xabc",
+  );
+});

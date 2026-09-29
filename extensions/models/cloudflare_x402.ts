@@ -35,6 +35,9 @@ const NETWORK_CHAIN_IDS: Record<string, number> = {
 /** USDC and most x402-settled stablecoins expose 6 decimals. */
 const DEFAULT_TOKEN_DECIMALS = 6;
 
+/** swamp imposes no method timeout, so every request carries its own. */
+const DEFAULT_TIMEOUT_SECONDS = 30;
+
 const GlobalArgsSchema = z.object({
   privateKey: z.string().meta({ sensitive: true }).regex(
     /^0x[0-9a-fA-F]{64}$/,
@@ -50,6 +53,10 @@ const GlobalArgsSchema = z.object({
   ).describe(
     "Decimals of the settlement token, used to convert the USDC ceiling to base units (USDC = 6).",
   ),
+  timeoutSeconds: z.number().int().min(1).default(DEFAULT_TIMEOUT_SECONDS)
+    .describe(
+      "Default time limit, in seconds, for each HTTP request including its response body. Per-call `timeoutSeconds` overrides it.",
+    ),
 });
 
 type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
@@ -94,7 +101,9 @@ const PaymentSchema = z.object({
   url: z.string(),
   method: z.string(),
   paid: z.boolean(),
-  httpStatus: z.number(),
+  httpStatus: z.number().describe(
+    "HTTP status of the final response; 0 when the paid retry timed out before any response arrived.",
+  ),
   network: z.string().nullable(),
   amountUsdc: z.number().nullable(),
   payTo: z.string().nullable(),
@@ -114,6 +123,9 @@ const ProbeArgsSchema = z.object({
   url: z.string().url(),
   method: z.enum(HTTP_METHODS).default("GET"),
   headers: z.record(z.string(), z.string()).optional(),
+  timeoutSeconds: z.number().int().min(1).optional().describe(
+    "Override the model's default per-request time limit for this call.",
+  ),
   requestId: z.string().default("quote").describe(
     "Instance name for the stored quote (default 'quote', distinct from pay's 'payment' so a probe never becomes the latest version of a payment). Use distinct values to keep separate quotes. Avoid the reserved name 'latest'.",
   ),
@@ -131,10 +143,22 @@ const PayArgsSchema = z.object({
   maxAmountUsdc: z.number().positive().optional().describe(
     "Override the model's default per-request ceiling for this call.",
   ),
+  timeoutSeconds: z.number().int().min(1).optional().describe(
+    "Override the model's default per-request time limit for this call.",
+  ),
   requestId: z.string().default("payment").describe(
     "Instance name for the stored payment record (default 'payment', distinct from probe's 'quote'). Repeated pays on one name are kept as versions and all count toward spend. Avoid the reserved name 'latest'.",
   ),
 });
+
+/** True for the rejection an `AbortSignal.timeout` signal produces. */
+function isTimeout(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "TimeoutError";
+}
+
+function timeoutError(what: string, url: string, seconds: number): Error {
+  return new Error(`${what} ${url} timed out after ${seconds}s`);
+}
 
 /** The maximum response body we persist, to keep data snapshots bounded. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -334,7 +358,7 @@ function decodePaymentResponse(
  */
 export const model = {
   type: "@sntxrr/cloudflare-x402",
-  version: "2026.09.29.1",
+  version: "2026.09.29.2",
   globalArguments: GlobalArgsSchema,
   resources: {
     "payment": {
@@ -362,12 +386,26 @@ export const model = {
         context: ProbeContext,
       ) => {
         const { globalArgs, logger } = context;
+        // Definitions saved before 2026.09.29.2 may lack timeoutSeconds.
+        const timeoutSeconds = args.timeoutSeconds ??
+          globalArgs.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
         logger.info("Probing x402 resource {url}", { url: args.url });
 
-        const res = await fetch(args.url, {
-          method: args.method,
-          headers: args.headers,
-        });
+        // One signal covers the request and the body read.
+        const signal = AbortSignal.timeout(timeoutSeconds * 1000);
+        let res: Response;
+        try {
+          res = await fetch(args.url, {
+            method: args.method,
+            headers: args.headers,
+            signal,
+          });
+        } catch (err) {
+          if (isTimeout(err)) {
+            throw timeoutError("Probe of", args.url, timeoutSeconds);
+          }
+          throw err;
+        }
 
         let parsed = {
           version: null as number | null,
@@ -377,7 +415,10 @@ export const model = {
         if (res.status === 402) {
           try {
             parsed = parseAccepts(await res.json(), globalArgs.tokenDecimals);
-          } catch {
+          } catch (err) {
+            if (isTimeout(err)) {
+              throw timeoutError("Probe of", args.url, timeoutSeconds);
+            }
             parsed.error = "402 response body was not valid JSON";
           }
         } else {
@@ -418,21 +459,43 @@ export const model = {
           globalArgs.privateKey as `0x${string}`,
         );
         const ceilingUsdc = args.maxAmountUsdc ?? globalArgs.maxAmountUsdc;
+        // Definitions saved before 2026.09.29.2 may lack timeoutSeconds.
+        const timeoutSeconds = args.timeoutSeconds ??
+          globalArgs.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
 
         logger.info("Requesting x402 resource {url} as {payer}", {
           url: args.url,
           payer: account.address,
         });
 
-        // First attempt — expect a 402 challenge (or a free 200).
-        const challenge = await fetch(args.url, {
-          method: args.method,
-          headers: args.headers,
-          body: args.body,
-        });
+        // First attempt — expect a 402 challenge (or a free 200). Nothing
+        // has been signed yet, so a timeout here spends nothing.
+        const challengeSignal = AbortSignal.timeout(timeoutSeconds * 1000);
+        const challengeTimedOut = () =>
+          timeoutError(
+            "Payment challenge request to",
+            args.url,
+            timeoutSeconds,
+          );
+        let challenge: Response;
+        try {
+          challenge = await fetch(args.url, {
+            method: args.method,
+            headers: args.headers,
+            body: args.body,
+            signal: challengeSignal,
+          });
+        } catch (err) {
+          if (isTimeout(err)) throw challengeTimedOut();
+          throw err;
+        }
 
         if (challenge.status !== 402) {
-          const { body, truncated } = await readCappedBody(challenge);
+          const { body, truncated } = await readCappedBody(challenge).catch(
+            (err) => {
+              throw isTimeout(err) ? challengeTimedOut() : err;
+            },
+          );
           const handle = await context.writeResource(
             "payment",
             args.requestId,
@@ -459,7 +522,10 @@ export const model = {
           return { dataHandles: [handle] };
         }
 
-        const challengeBody = await challenge.json().catch(() => ({}));
+        const challengeBody = await challenge.json().catch((err) => {
+          if (isTimeout(err)) throw challengeTimedOut();
+          return {};
+        });
         const { version, accepts } = parseAccepts(
           challengeBody,
           globalArgs.tokenDecimals,
@@ -531,18 +597,56 @@ export const model = {
           version ?? 1,
         );
 
-        // Retry with the signed payment authorization.
-        const paidRes = await fetch(args.url, {
-          method: args.method,
-          headers: { ...args.headers, "X-PAYMENT": paymentHeader },
-          body: args.body,
-        });
-
-        const receipt = decodePaymentResponse(
-          paidRes.headers.get("x-payment-response"),
-        );
-        const { body: responseBody, truncated: responseTruncated } =
-          await readCappedBody(paidRes);
+        // Retry with the signed payment authorization. Once X-PAYMENT is
+        // sent the payment may settle, so a timeout from here on must still
+        // leave a payment record (receipt unknown) rather than lose it.
+        const paidSignal = AbortSignal.timeout(timeoutSeconds * 1000);
+        let paidRes: Response | null = null;
+        let receipt: z.infer<typeof PaymentReceiptSchema> | null = null;
+        let responseBody = "";
+        let responseTruncated = false;
+        try {
+          paidRes = await fetch(args.url, {
+            method: args.method,
+            headers: { ...args.headers, "X-PAYMENT": paymentHeader },
+            body: args.body,
+            signal: paidSignal,
+          });
+          receipt = decodePaymentResponse(
+            paidRes.headers.get("x-payment-response"),
+          );
+          ({ body: responseBody, truncated: responseTruncated } =
+            await readCappedBody(paidRes));
+        } catch (err) {
+          if (!isTimeout(err)) throw err;
+          const handle = await context.writeResource(
+            "payment",
+            args.requestId,
+            {
+              url: args.url,
+              method: args.method,
+              paid: true,
+              httpStatus: paidRes?.status ?? 0,
+              network: requirement.network,
+              amountUsdc: requirement.amountUsdc ?? null,
+              payTo: requirement.payTo ?? null,
+              payer: account.address,
+              receipt,
+              responseContentType: paidRes?.headers.get("content-type") ??
+                null,
+              responseBody: "",
+              responseTruncated: false,
+              paidAt: new Date().toISOString(),
+            },
+          );
+          logger.warn(
+            "Paid retry timed out; recorded as {name} with an unconfirmed receipt",
+            { name: handle.name },
+          );
+          throw new Error(
+            `Paid retry to ${args.url} timed out after ${timeoutSeconds}s after the X-PAYMENT header was sent — the payment may have settled. Recorded as paid with no receipt in '${args.requestId}'; check the payer's on-chain history before retrying.`,
+          );
+        }
 
         if (!paidRes.ok) {
           throw new Error(
@@ -583,6 +687,12 @@ export const model = {
       toVersion: "2026.09.29.1",
       description:
         "probe and pay default to separate data names ('quote' / 'payment') instead of sharing 'current'; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.29.2",
+      description:
+        "HTTP requests time out (new optional global argument timeoutSeconds, default 30 — no migration needed); a timed-out paid retry is recorded as paid with no receipt",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

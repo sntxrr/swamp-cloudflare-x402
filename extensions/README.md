@@ -40,6 +40,7 @@ Global arguments:
 | `privateKey`    | —       | 0x-prefixed 32-byte EVM private key. **Store in a vault.**               |
 | `maxAmountUsdc` | `0.1`   | Per-request spend ceiling in whole USDC. Payments above this are refused. |
 | `tokenDecimals` | `6`     | Decimals of the settlement token (USDC = 6), used for USDC↔base-unit math. |
+| `timeoutSeconds` | `30`   | Time limit for each HTTP request, including its response body. A resource that never answers fails the call instead of holding the run (and the model lock) open. |
 
 ## Methods
 
@@ -52,8 +53,9 @@ to check the price and terms first.
 swamp model method run my-wallet probe --input url=https://api.example.com/paid-tool
 ```
 
-Optional inputs: `method` (default `GET`), `headers`, and `requestId` (stored
-instance name, default `quote`; the name `latest` is reserved by swamp).
+Optional inputs: `method` (default `GET`), `headers`, `timeoutSeconds`
+(overrides the model default for this call), and `requestId` (stored instance
+name, default `quote`; the name `latest` is reserved by swamp).
 
 The result is written to the `quote` resource:
 
@@ -77,7 +79,8 @@ swamp model method run my-wallet pay \
 ```
 
 Optional inputs: `method` (default `GET`), `headers`, `body` (raw string),
-`maxAmountUsdc` (overrides the model default for this call), and `requestId`
+`maxAmountUsdc` and `timeoutSeconds` (each overrides the model default for this
+call), and `requestId`
 (default `payment`; repeated pays on one name are kept as versions, and the
 spend report counts every retained version).
 
@@ -92,7 +95,14 @@ swamp data get my-wallet --name payment --json
 If the resource returns a normal `2xx` (no challenge), nothing is paid and
 `paid` is recorded as `false`. If the required amount exceeds your ceiling, or no
 `exact` EVM option is offered on a supported network, the method fails before any
-authorization is signed.
+authorization is signed. A challenge request that times out also fails before
+anything is signed.
+
+If the **paid** request times out, the `X-PAYMENT` authorization has already been
+sent and the payment may have settled. The method still fails, but first writes a
+`payment` record with `paid: true` and `receipt: null` (`httpStatus` 0 when no
+response arrived), which the spend report counts as an unconfirmed settlement.
+Check the payer's on-chain history before paying again.
 
 ## Reports
 
