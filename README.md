@@ -42,7 +42,8 @@ swamp model create @sntxrr/cloudflare-x402 my-wallet \
 # Check the price, then pay
 swamp model method run my-wallet probe --input url=https://api.example.com/paid-tool
 swamp model method run my-wallet pay   --input url=https://api.example.com/paid-tool
-swamp data get my-wallet --name current --json
+swamp data get my-wallet --name quote --json    # the probe
+swamp data get my-wallet --name payment --json  # the receipt
 ```
 
 Full method reference, global arguments, supported networks, and safety notes
@@ -122,7 +123,7 @@ swamp model create @sntxrr/cloudflare-x402 x402-tester \
 # 4. Probe (no payment), then pay (signs + settles)
 swamp model method run x402-tester probe --input url=http://localhost:4021/paid
 swamp model method run x402-tester pay   --input url=http://localhost:4021/paid
-swamp data get x402-tester --name current --json
+swamp data get x402-tester --name payment --json
 
 # 5. See the spend report, then clean up
 swamp report get @sntxrr/x402-spend --model x402-tester --markdown

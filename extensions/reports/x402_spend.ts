@@ -53,21 +53,26 @@ function fmtUsdc(value: number | null | undefined): string {
   return (value ?? 0).toFixed(4);
 }
 
-/** Load the latest version of every `payment` record for a model instance. */
+/** Load every retained version of every `payment` record for a model. */
 async function loadPayments(context: ModelReportContext): Promise<Payment[]> {
   const { modelType, modelId, dataRepository } = context;
   const all = await dataRepository.findAllForModel(modelType, modelId);
 
-  // Keep only the highest version per data name; skip report artifacts.
-  const latest = new Map<string, { name: string; version?: number }>();
+  // Each pay writes a new version; count each (name, version) once, so
+  // repeated pays on one requestId, or a probe written after a pay under the
+  // same name, never hide a payment. Skip report artifacts.
+  const seen = new Set<string>();
+  const versions: Array<{ name: string; version?: number }> = [];
   for (const d of all) {
     if (d.name.startsWith("report-")) continue;
-    const prev = latest.get(d.name);
-    if (!prev || (d.version ?? 0) > (prev.version ?? 0)) latest.set(d.name, d);
+    const key = `${d.name}@${d.version ?? 0}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    versions.push(d);
   }
 
   const payments: Payment[] = [];
-  for (const d of latest.values()) {
+  for (const d of versions) {
     const bytes = await dataRepository.getContent(
       modelType,
       modelId,
