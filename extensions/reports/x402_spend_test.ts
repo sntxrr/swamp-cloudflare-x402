@@ -1,6 +1,6 @@
 // extensions/reports/x402_spend_test.ts
 import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1.0.19";
-import { createReportTestContext } from "jsr:@swamp-club/swamp-testing";
+import { createReportTestContext } from "jsr:@swamp-club/swamp-testing@0.20260928.39";
 import { report } from "./x402_spend.ts";
 
 type SpendReportContext = Parameters<typeof report.execute>[0];

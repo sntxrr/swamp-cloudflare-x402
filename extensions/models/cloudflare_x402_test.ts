@@ -7,7 +7,7 @@ import {
 import {
   createModelTestContext,
   withMockedFetch,
-} from "jsr:@swamp-club/swamp-testing";
+} from "jsr:@swamp-club/swamp-testing@0.20260928.39";
 import { model } from "./cloudflare_x402.ts";
 
 type ProbeContext = Parameters<typeof model.methods.probe.execute>[1];
