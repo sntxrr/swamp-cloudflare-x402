@@ -58,38 +58,37 @@ async function loadPayments(context: ModelReportContext): Promise<Payment[]> {
   const { modelType, modelId, dataRepository } = context;
   const all = await dataRepository.findAllForModel(modelType, modelId);
 
-  // Each pay writes a new version; count each (name, version) once, so
-  // repeated pays on one requestId, or a probe written after a pay under the
-  // same name, never hide a payment. Skip report artifacts.
-  const seen = new Set<string>();
-  const versions: Array<{ name: string; version?: number }> = [];
+  // findAllForModel lists only the latest version of each data name, but every
+  // pay writes a new version (and pre-2026.09.29.1 a later probe could share
+  // the name). Walk each name down from its latest version until the older
+  // versions have been garbage-collected. Skip report artifacts.
+  const latest = new Map<string, number>();
   for (const d of all) {
     if (d.name.startsWith("report-")) continue;
-    const key = `${d.name}@${d.version ?? 0}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    versions.push(d);
+    latest.set(d.name, Math.max(latest.get(d.name) ?? 0, d.version ?? 1));
   }
 
   const payments: Payment[] = [];
-  for (const d of versions) {
-    const bytes = await dataRepository.getContent(
-      modelType,
-      modelId,
-      d.name,
-      d.version,
-    );
-    if (!bytes) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(bytes));
-    } catch {
-      continue;
+  for (const [name, top] of latest) {
+    for (let version = top; version >= 1; version--) {
+      const bytes = await dataRepository.getContent(
+        modelType,
+        modelId,
+        name,
+        version,
+      );
+      if (!bytes) break; // older versions were garbage-collected
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(new TextDecoder().decode(bytes));
+      } catch {
+        continue;
+      }
+      // Payment records carry `paid` + `paidAt`; quote records (which carry
+      // `paymentRequired`) fail this parse and are skipped.
+      const result = PaymentSchema.safeParse(parsed);
+      if (result.success) payments.push(result.data);
     }
-    // Payment records carry `paid` + `paidAt`; quote records (which carry
-    // `paymentRequired`) fail this parse and are skipped.
-    const result = PaymentSchema.safeParse(parsed);
-    if (result.success) payments.push(result.data);
   }
   return payments;
 }
