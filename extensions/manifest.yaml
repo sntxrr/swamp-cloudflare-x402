@@ -1,8 +1,9 @@
 manifestVersion: 1
 
 name: "@sntxrr/cloudflare-x402"
-version: "2026.09.29.3"
+version: "2026.10.14.1"
 description: "Pay for and inspect x402-protected HTTP resources and MCP tools — the Cloudflare agents payment standard — with a local EVM wallet, plus an x402 spend report"
+license: MIT
 repository: "https://github.com/sntxrr/swamp-cloudflare-x402"
 
 models:
