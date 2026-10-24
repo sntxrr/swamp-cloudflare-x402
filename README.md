@@ -64,7 +64,10 @@ swamp report get @sntxrr/x402-spend --model my-wallet --json     # structured
 ```
 
 It reports total USDC spent, a per-network and per-resource breakdown, the
-on-chain settlement rate, and counts of unpaid / unconfirmed requests. Example:
+on-chain settlement rate, and counts of unpaid / unconfirmed requests. Networks
+are labelled by CAIP-2 id, so v1 `base` and v2 `eip155:8453` spend share one row.
+Payments a server refused at verification are listed apart, as outstanding or
+refused, and not counted as spend. Example:
 
 ```
 ## x402 spend summary — my-wallet
@@ -73,8 +76,8 @@ on-chain settlement rate, and counts of unpaid / unconfirmed requests. Example:
 
 | Network      | Requests |   USDC |
 | ------------ | -------: | -----: |
-| base         |       11 | 2.1000 |
-| base-sepolia |        7 | 1.3200 |
+| eip155:8453  |       11 | 2.1000 |
+| eip155:84532 |        7 | 1.3200 |
 ```
 
 Skip it for a run with `--skip-report @sntxrr/x402-spend`, or filter by its
@@ -86,6 +89,26 @@ EVM "exact" scheme on `base`, `base-sepolia`, `avalanche`, `avalanche-fuji`,
 `polygon`, `polygon-amoy`, `sei`, `sei-testnet`. Start on a testnet
 (`base-sepolia`) with test USDC before pointing at mainnet resources — the wallet
 holds real funds.
+
+Both x402 transports are supported, and the envelope follows the challenge's
+`x402Version`. **v1** sends the challenge as a JSON body, with network names such
+as `base`, and uses `X-PAYMENT` / `X-PAYMENT-RESPONSE`. **v2** sends it
+base64-encoded in the `PAYMENT-REQUIRED` header, with CAIP-2 network ids such as
+`eip155:8453`, and uses `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE`. A v2 id is
+accepted only for a chain listed above (`eip155:8453`, `eip155:84532`, …), and
+only the EIP-3009 transfer method is signed: an offer that asks for Permit2 is
+skipped.
+
+A v2 server that **refuses the payment at verification** (a `402` with a fresh
+`PAYMENT-REQUIRED` header naming the reason, and no `PAYMENT-RESPONSE`) is
+recorded with `refused: true` and the reason in `receipt.errorReason`. That is the
+server's word, not proof: the signed authorization stays valid until the
+record's `validBefore`, and its `authorizationNonce` lets you check its use
+on-chain. The spend report lists it as **outstanding** until then and as
+**refused (server-reported)** after, and counts neither as spend. A
+`PAYMENT-RESPONSE` with `success: false` is not a refusal: it may carry a
+broadcast transaction, so it stays an unconfirmed settlement that counts as
+spend.
 
 ## Testing
 
@@ -105,6 +128,17 @@ resource server that issues a real `402` challenge (USDC "exact" scheme on
 `base-sepolia`) and "settles" a mock payment — so you can exercise the full flow
 (real EIP-712 signing, the `X-PAYMENT` header, receipt decode) without a
 blockchain or any funds.
+
+Add `--v2` to serve the x402 v2 spec's example challenge in the
+`PAYMENT-REQUIRED` header (`eip155:84532`). In that mode the mock verifies each
+`PAYMENT-SIGNATURE` like a facilitator: `accepted` must equal the offer, the
+authorization must pay its amount to `payTo`, and the EIP-712 signature must
+recover the payer. Otherwise it answers with a verify refusal.
+`--unfunded <address>` refuses that payer for insufficient balance:
+
+```bash
+deno run --allow-net examples/mock_x402_server.ts 4021 --v2 --unfunded 0xYourAddress &
+```
 
 ```bash
 # 1. Start the mock server (defaults to port 4021)

@@ -115,8 +115,9 @@ Deno.test("x402-spend aggregates paid records by network and resource", async ()
   assertEquals(result.json.totalUsdc, 0.06);
   assertEquals(result.json.settledRate, 1);
   const byNetwork = result.json.byNetwork as Record<string, { usdc: number }>;
-  assertEquals(byNetwork["base"].usdc, 0.05);
-  assertEquals(byNetwork["base-sepolia"].usdc, 0.01);
+  // Rows are labelled by CAIP-2 id, so v1 and v2 spend on one chain share one.
+  assertEquals(byNetwork["eip155:8453"].usdc, 0.05);
+  assertEquals(byNetwork["eip155:84532"].usdc, 0.01);
   assertStringIncludes(result.markdown, "x402 spend summary");
   assertStringIncludes(result.markdown, "0.0600 USDC");
 });
@@ -191,4 +192,80 @@ Deno.test("x402-spend stops at garbage-collected versions", async () => {
 
   assertEquals(result.json.paidRequests, 2);
   assertEquals(result.json.totalUsdc, 0.03);
+});
+
+Deno.test("x402-spend merges v1 and v2 names for one chain into one row", async () => {
+  const result = await report.execute(ctx([
+    paymentArtifact("v1", paidRecord({ network: "base", amountUsdc: 0.02 })),
+    paymentArtifact(
+      "v2",
+      paidRecord({ network: "eip155:8453", amountUsdc: 0.03 }),
+    ),
+  ]));
+  const byNetwork = result.json.byNetwork as Record<string, { usdc: number }>;
+  assertEquals(Object.keys(byNetwork), ["eip155:8453"]);
+  assertEquals(byNetwork["eip155:8453"].usdc, 0.05);
+});
+
+Deno.test("x402-spend shows a refusal as outstanding until validBefore, then refused", async () => {
+  const refusal = (validBefore: string) =>
+    paidRecord({
+      network: "eip155:84532",
+      amountUsdc: 0.001,
+      httpStatus: 402,
+      refused: true,
+      validBefore,
+      authorizationNonce: "0x01",
+      receipt: {
+        success: false,
+        transaction: null,
+        network: "eip155:84532",
+        payer: "0xPayer",
+        errorReason: "invalid_exact_evm_insufficient_balance",
+      },
+    });
+
+  const open = await report.execute(ctx([
+    paymentArtifact("unfunded", refusal("2999-01-01T00:00:00.000Z")),
+  ]));
+  assertEquals(open.json.paidRequests, 0);
+  assertEquals(open.json.totalUsdc, 0);
+  assertEquals(open.json.outstandingCount, 1);
+  assertEquals(open.json.outstandingUsdc, 0.001);
+  assertEquals(open.json.refusedCount, 0);
+  assertStringIncludes(open.markdown, "**Outstanding:** 1 payment(s)");
+
+  const expired = await report.execute(ctx([
+    paymentArtifact("unfunded", refusal("2020-01-01T00:00:00.000Z")),
+  ]));
+  assertEquals(expired.json.totalUsdc, 0);
+  assertEquals(expired.json.outstandingCount, 0);
+  assertEquals(expired.json.refusedCount, 1);
+  assertEquals(expired.json.refusedUsdc, 0.001);
+  assertStringIncludes(expired.markdown, "**Refused (server-reported):** 1");
+});
+
+Deno.test("x402-spend still counts a failed settlement that carries a tx", async () => {
+  const result = await report.execute(ctx([
+    paymentArtifact(
+      "failed",
+      paidRecord({
+        network: "eip155:84532",
+        amountUsdc: 0.001,
+        httpStatus: 402,
+        refused: false,
+        receipt: {
+          success: false,
+          transaction: "0xdead",
+          network: "eip155:84532",
+          payer: "0xPayer",
+          errorReason: "transfer_event_mismatch",
+        },
+      }),
+    ),
+  ]));
+  assertEquals(result.json.paidRequests, 1);
+  assertEquals(result.json.totalUsdc, 0.001);
+  assertEquals(result.json.failedSettlement, 1);
+  assertEquals(result.json.refusedCount, 0);
 });

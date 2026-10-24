@@ -5,8 +5,14 @@
  * The `pay` method drives the full 402 flow: it requests a protected resource,
  * reads the `402 Payment Required` challenge, signs an EIP-3009
  * `TransferWithAuthorization` (USDC "exact" scheme) with the configured wallet,
- * retries with the `X-PAYMENT` header, and stores the settlement receipt from
- * `X-PAYMENT-RESPONSE`. The `probe` method inspects the price without paying.
+ * retries with the signed payment, and stores the settlement receipt. The
+ * `probe` method inspects the price without paying.
+ *
+ * Both x402 transports are supported. v1 sends the challenge as a JSON body and
+ * uses `X-PAYMENT` / `X-PAYMENT-RESPONSE`; v2 sends it base64-encoded in the
+ * `PAYMENT-REQUIRED` header with CAIP-2 network ids (`eip155:8453`) and uses
+ * `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE`. The envelope follows the
+ * challenge's `x402Version`.
  *
  * Modeled after the client-side flow documented at
  * https://developers.cloudflare.com/agents/tools/payments/. Signing is done
@@ -31,6 +37,41 @@ const NETWORK_CHAIN_IDS: Record<string, number> = {
   "sei": 1329,
   "sei-testnet": 1328,
 };
+
+const SUPPORTED_CHAIN_IDS = new Set(Object.values(NETWORK_CHAIN_IDS));
+
+/**
+ * The chain ID for a v1 network name (`base`) or a v2 CAIP-2 id
+ * (`eip155:8453`). CAIP-2 ids are accepted only for the chains the v1 names
+ * cover, so v2 does not widen the set of chains this wallet will sign for.
+ */
+function chainIdFor(network: string): number | undefined {
+  if (Object.hasOwn(NETWORK_CHAIN_IDS, network)) {
+    return NETWORK_CHAIN_IDS[network];
+  }
+  const m = /^eip155:(\d+)$/.exec(network);
+  if (m) {
+    const id = Number(m[1]);
+    if (SUPPORTED_CHAIN_IDS.has(id)) return id;
+  }
+  return undefined;
+}
+
+/** Base64 of a string's UTF-8 bytes (v2 headers carry server free text). */
+function b64EncodeUtf8(text: string): string {
+  let binary = "";
+  for (const b of new TextEncoder().encode(text)) {
+    binary += String.fromCharCode(b);
+  }
+  return btoa(binary);
+}
+
+/** Decode base64 to a UTF-8 string; throws on invalid base64 or UTF-8. */
+function b64DecodeUtf8(value: string): string {
+  const binary = atob(value.trim());
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+}
 
 /** USDC and most x402-settled stablecoins expose 6 decimals. */
 const DEFAULT_TOKEN_DECIMALS = 6;
@@ -67,7 +108,9 @@ const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const PaymentRequirementSchema = z.object({
   scheme: z.string(),
   network: z.string(),
-  maxAmountRequired: z.string(),
+  maxAmountRequired: z.string().describe(
+    "Price in token base units: v1 `maxAmountRequired`, or v2 `amount`.",
+  ),
   resource: z.string().optional(),
   description: z.string().optional(),
   mimeType: z.string().optional(),
@@ -95,6 +138,9 @@ const PaymentReceiptSchema = z.object({
   transaction: z.string().nullable(),
   network: z.string().nullable(),
   payer: z.string().nullable(),
+  errorReason: z.string().nullable().optional().describe(
+    "Why the server did not settle, when it said so.",
+  ),
 });
 
 const PaymentSchema = z.object({
@@ -117,6 +163,15 @@ const PaymentSchema = z.object({
     "True when responseBody was capped at 64 KiB.",
   ),
   paidAt: z.string(),
+  refused: z.boolean().optional().describe(
+    "True when the server refused the signed payment at verification (a v2 402 carrying a PAYMENT-REQUIRED error and no PAYMENT-RESPONSE). paid stays true: the authorization was sent and stays valid until validBefore, so this is the server's word, not proof.",
+  ),
+  validBefore: z.string().optional().describe(
+    "When the signed authorization expires (ISO 8601); after this it can no longer settle.",
+  ),
+  authorizationNonce: z.string().optional().describe(
+    "The EIP-3009 nonce of the signed authorization, to check its use on-chain.",
+  ),
 });
 
 const ProbeArgsSchema = z.object({
@@ -135,7 +190,7 @@ const PayArgsSchema = z.object({
   url: z.string().url(),
   method: z.enum(HTTP_METHODS).default("GET"),
   headers: z.record(z.string(), z.string()).optional().describe(
-    "Extra request headers (e.g. Content-Type). The X-PAYMENT header is added automatically.",
+    "Extra request headers (e.g. Content-Type). The payment header (X-PAYMENT for x402 v1, PAYMENT-SIGNATURE for v2) is added automatically.",
   ),
   body: z.string().optional().describe(
     "Raw request body string sent on both the challenge and paid attempts.",
@@ -204,25 +259,89 @@ async function readCappedBody(
   return { body: text, truncated: false };
 }
 
-/** Normalize the `accepts` array from a 402 body into typed requirements. */
+/** Where a 402 challenge was read from, and its decoded object. */
+type Challenge = {
+  source: "header" | "body";
+  obj: Record<string, unknown>;
+  error: string | null;
+};
+
+/**
+ * Read a 402 challenge: the v2 `PAYMENT-REQUIRED` header (base64 JSON) when
+ * present, otherwise the v1 JSON body. The header wins over the body.
+ */
+async function readChallenge(res: Response): Promise<Challenge> {
+  const header = res.headers.get("payment-required");
+  if (header) {
+    // Drain the body so the connection can be reused.
+    await res.text().catch((err) => {
+      if (isTimeout(err)) throw err;
+    });
+    try {
+      const obj = JSON.parse(b64DecodeUtf8(header));
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        return { source: "header", obj, error: null };
+      }
+    } catch {
+      // fall through
+    }
+    return {
+      source: "header",
+      obj: {},
+      error: "PAYMENT-REQUIRED header was not valid base64 JSON",
+    };
+  }
+  try {
+    const body = await res.json();
+    return {
+      source: "body",
+      obj: (body ?? {}) as Record<string, unknown>,
+      error: null,
+    };
+  } catch (err) {
+    if (isTimeout(err)) throw err;
+    return {
+      source: "body",
+      obj: {},
+      error: "402 response body was not valid JSON",
+    };
+  }
+}
+
+/**
+ * Normalize a challenge's `accepts` into typed requirements. `raws[i]` is the
+ * server's own object for `accepts[i]`: it is signed against and echoed back
+ * (v2 `accepted`), and is kept apart so it never reaches a stored quote.
+ */
 function parseAccepts(
-  body: unknown,
+  obj: Record<string, unknown>,
   decimals: number,
 ): {
   version: number | null;
   accepts: z.infer<typeof PaymentRequirementSchema>[];
+  raws: Record<string, unknown>[];
+  resource: unknown;
   error: string | null;
 } {
-  const obj = (body ?? {}) as Record<string, unknown>;
   const rawAccepts = Array.isArray(obj.accepts) ? obj.accepts : [];
-  const accepts = rawAccepts.map((raw) => {
-    const r = raw as Record<string, unknown>;
-    const maxAmountRequired = String(r.maxAmountRequired ?? "");
+  const raws = rawAccepts.map((raw) =>
+    (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>
+  );
+  // v2 names the resource once, at the top level, as an object.
+  const topResource = obj.resource as Record<string, unknown> | undefined;
+  const topResourceUrl = topResource && typeof topResource === "object" &&
+      topResource.url != null
+    ? String(topResource.url)
+    : undefined;
+  const accepts = raws.map((r) => {
+    const maxAmountRequired = String(r.amount ?? r.maxAmountRequired ?? "");
     return {
       scheme: String(r.scheme ?? ""),
       network: String(r.network ?? ""),
       maxAmountRequired,
-      resource: r.resource != null ? String(r.resource) : undefined,
+      resource: r.resource != null && typeof r.resource !== "object"
+        ? String(r.resource)
+        : topResourceUrl,
       description: r.description != null ? String(r.description) : undefined,
       mimeType: r.mimeType != null ? String(r.mimeType) : undefined,
       payTo: r.payTo != null ? String(r.payTo) : undefined,
@@ -238,8 +357,25 @@ function parseAccepts(
   return {
     version: typeof obj.x402Version === "number" ? obj.x402Version : null,
     accepts,
+    raws,
+    resource: obj.resource,
     error: obj.error != null ? String(obj.error) : null,
   };
+}
+
+/**
+ * True when this wallet can settle a requirement: the EVM "exact" scheme on a
+ * supported chain, via EIP-3009 (the default when `assetTransferMethod` is
+ * absent). Permit2 and other transfer methods are not signed.
+ */
+function isSettleable(
+  r: z.infer<typeof PaymentRequirementSchema>,
+  raw: Record<string, unknown>,
+): boolean {
+  const extra = (raw.extra ?? {}) as Record<string, unknown>;
+  const method = extra.assetTransferMethod;
+  return r.scheme === "exact" && chainIdFor(r.network) !== undefined &&
+    (method === undefined || method === "eip3009");
 }
 
 /** A random 32-byte nonce as a 0x-prefixed hex string. */
@@ -251,21 +387,35 @@ function randomNonce(): `0x${string}` {
   return hex as `0x${string}`;
 }
 
+/** A signed payment, ready to send, and what is needed to audit it. */
+type SignedPayment = {
+  headerName: "X-PAYMENT" | "PAYMENT-SIGNATURE";
+  headerValue: string;
+  validBefore: number;
+  nonce: string;
+};
+
 /**
- * Build the base64 `X-PAYMENT` header value for the "exact" EVM scheme by
- * signing an EIP-3009 TransferWithAuthorization with the wallet.
+ * Sign an EIP-3009 TransferWithAuthorization for the "exact" EVM scheme and
+ * wrap it in the envelope for the challenge's x402 version: v1 `X-PAYMENT`
+ * `{x402Version, scheme, network, payload}`, or v2 `PAYMENT-SIGNATURE`
+ * `{x402Version, resource, accepted, payload}` with `accepted` the server's own
+ * requirement object, echoed as received.
  */
-async function buildPaymentHeader(
+async function signPayment(
   account: ReturnType<typeof privateKeyToAccount>,
   requirement: z.infer<typeof PaymentRequirementSchema>,
-  extra: Record<string, unknown>,
-  x402Version: number,
-): Promise<string> {
-  const chainId = NETWORK_CHAIN_IDS[requirement.network];
+  raw: Record<string, unknown>,
+  x402Version: 1 | 2,
+  resource: unknown,
+): Promise<SignedPayment> {
+  const chainId = chainIdFor(requirement.network);
   if (chainId === undefined) {
     throw new Error(
       `Unsupported x402 network "${requirement.network}". Supported: ${
-        Object.keys(NETWORK_CHAIN_IDS).join(", ")
+        Object.entries(NETWORK_CHAIN_IDS).map(([name, id]) =>
+          `${name} (eip155:${id})`
+        ).join(", ")
       }`,
     );
   }
@@ -282,6 +432,7 @@ async function buildPaymentHeader(
 
   // Domain name/version come from the requirement's `extra` (EIP-712 domain of
   // the token contract, e.g. { name: "USDC", version: "2" }).
+  const extra = (raw.extra ?? {}) as Record<string, unknown>;
   const domainName = typeof extra.name === "string" ? extra.name : "USD Coin";
   const domainVersion = typeof extra.version === "string" ? extra.version : "2";
 
@@ -313,41 +464,93 @@ async function buildPaymentHeader(
     },
   });
 
-  const payload = {
-    x402Version,
-    scheme: requirement.scheme,
-    network: requirement.network,
-    payload: {
-      signature,
-      authorization: {
-        from: account.address,
-        to: requirement.payTo,
-        value: value.toString(),
-        validAfter: "0",
-        validBefore: String(validBefore),
-        nonce,
-      },
+  const signed = {
+    signature,
+    authorization: {
+      from: account.address,
+      to: requirement.payTo,
+      value: value.toString(),
+      validAfter: "0",
+      validBefore: String(validBefore),
+      nonce,
     },
   };
 
-  return btoa(JSON.stringify(payload));
+  if (x402Version === 2) {
+    const payload: Record<string, unknown> = { x402Version: 2 };
+    if (resource !== undefined) payload.resource = resource;
+    payload.accepted = raw;
+    payload.payload = signed;
+    return {
+      headerName: "PAYMENT-SIGNATURE",
+      headerValue: b64EncodeUtf8(JSON.stringify(payload)),
+      validBefore,
+      nonce,
+    };
+  }
+
+  return {
+    headerName: "X-PAYMENT",
+    headerValue: btoa(JSON.stringify({
+      x402Version,
+      scheme: requirement.scheme,
+      network: requirement.network,
+      payload: signed,
+    })),
+    validBefore,
+    nonce,
+  };
 }
 
-/** Decode the base64 `X-PAYMENT-RESPONSE` settlement receipt, if present. */
+/**
+ * Decode a settlement receipt: v2 `PAYMENT-RESPONSE` (base64 UTF-8 JSON) or
+ * v1 `X-PAYMENT-RESPONSE`. Returns null when neither header is present or the
+ * value cannot be decoded.
+ */
 function decodePaymentResponse(
-  header: string | null,
+  res: Response,
 ): z.infer<typeof PaymentReceiptSchema> | null {
+  const v2 = res.headers.get("payment-response");
+  const header = v2 ?? res.headers.get("x-payment-response");
   if (!header) return null;
   try {
-    const decoded = JSON.parse(atob(header)) as Record<string, unknown>;
+    const decoded = JSON.parse(
+      v2 ? b64DecodeUtf8(header) : atob(header),
+    ) as Record<string, unknown>;
     return {
       success: decoded.success === true,
-      transaction: decoded.transaction != null
+      // v2 facilitators send "" when nothing was broadcast.
+      transaction: decoded.transaction != null &&
+          !(v2 && decoded.transaction === "")
         ? String(decoded.transaction)
         : null,
       network: decoded.network != null ? String(decoded.network) : null,
       payer: decoded.payer != null ? String(decoded.payer) : null,
+      errorReason: decoded.errorReason != null
+        ? String(decoded.errorReason)
+        : null,
     };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The reason a v2 server refused a payment at verification: a non-2xx paid
+ * retry with no settlement receipt, carrying a fresh `PAYMENT-REQUIRED` header
+ * whose `error` names why. Null when the response is not that shape.
+ */
+function verifyRefusalReason(res: Response): string | null {
+  if (res.ok) return null;
+  if (res.headers.get("payment-response")) return null;
+  if (res.headers.get("x-payment-response")) return null;
+  const header = res.headers.get("payment-required");
+  if (!header) return null;
+  try {
+    const obj = JSON.parse(b64DecodeUtf8(header)) as Record<string, unknown>;
+    return obj.error != null && String(obj.error) !== ""
+      ? String(obj.error)
+      : null;
   } catch {
     return null;
   }
@@ -358,7 +561,7 @@ function decodePaymentResponse(
  */
 export const model = {
   type: "@sntxrr/cloudflare-x402",
-  version: "2026.09.29.3",
+  version: "2026.10.24.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     "payment": {
@@ -413,13 +616,28 @@ export const model = {
           error: null as string | null,
         };
         if (res.status === 402) {
+          let challenge: Challenge;
           try {
-            parsed = parseAccepts(await res.json(), globalArgs.tokenDecimals);
+            challenge = await readChallenge(res);
           } catch (err) {
             if (isTimeout(err)) {
               throw timeoutError("Probe of", args.url, timeoutSeconds);
             }
-            parsed.error = "402 response body was not valid JSON";
+            throw err;
+          }
+          if (challenge.error) {
+            parsed.error = challenge.error;
+          } else {
+            const { version, accepts, error } = parseAccepts(
+              challenge.obj,
+              globalArgs.tokenDecimals,
+            );
+            parsed = { version, accepts, error };
+            if (challenge.source === "header" && version !== 2) {
+              parsed.error = `PAYMENT-REQUIRED header carried x402Version ${
+                version ?? "(none)"
+              }; only 2 is supported in that header`;
+            }
           }
         } else {
           // Drain the body so the connection can be reused.
@@ -522,40 +740,75 @@ export const model = {
           return { dataHandles: [handle] };
         }
 
-        const challengeBody = await challenge.json().catch((err) => {
-          if (isTimeout(err)) throw challengeTimedOut();
-          return {};
-        });
-        const { version, accepts } = parseAccepts(
-          challengeBody,
+        let parsedChallenge: Challenge;
+        try {
+          parsedChallenge = await readChallenge(challenge);
+        } catch (err) {
+          throw isTimeout(err) ? challengeTimedOut() : err;
+        }
+        if (parsedChallenge.source === "header" && parsedChallenge.error) {
+          throw new Error(
+            `${parsedChallenge.error} from ${args.url}; nothing was signed.`,
+          );
+        }
+        const { version, accepts, raws, resource } = parseAccepts(
+          parsedChallenge.obj,
           globalArgs.tokenDecimals,
         );
 
+        // The envelope follows the challenge's x402Version, not where the
+        // challenge was found. A version we cannot send is refused before
+        // anything is signed.
+        let envelope: 1 | 2;
+        if (version === 2) {
+          envelope = 2;
+        } else if (
+          version === 1 ||
+          (version === null && parsedChallenge.source === "body")
+        ) {
+          envelope = 1;
+        } else {
+          throw new Error(
+            `Unsupported x402Version ${version ?? "(none)"} in the ${
+              parsedChallenge.source === "header"
+                ? "PAYMENT-REQUIRED header"
+                : "402 body"
+            } from ${args.url}; nothing was signed.`,
+          );
+        }
+
         // Select a requirement we can settle: an EVM "exact" scheme on a known
-        // network, cheapest first.
+        // network via EIP-3009, cheapest first.
         const candidates = accepts
-          .filter((r) =>
-            r.scheme === "exact" && NETWORK_CHAIN_IDS[r.network] !== undefined
-          )
+          .map((r, i) => ({ r, raw: raws[i] }))
+          .filter(({ r, raw }) => isSettleable(r, raw))
           .sort((a, b) => {
             try {
-              const d = BigInt(a.maxAmountRequired) -
-                BigInt(b.maxAmountRequired);
+              const d = BigInt(a.r.maxAmountRequired) -
+                BigInt(b.r.maxAmountRequired);
               return d < 0n ? -1 : d > 0n ? 1 : 0;
             } catch {
               return 0;
             }
           });
 
-        const requirement = candidates[0];
-        if (!requirement) {
+        const chosen = candidates[0];
+        if (!chosen) {
           throw new Error(
             `No settleable "exact" EVM payment option offered by ${args.url}. Offered: ${
-              accepts.map((a) => `${a.scheme}/${a.network}`).join(", ") ||
-              "none"
+              accepts.map((a, i) => {
+                const method = ((raws[i].extra ?? {}) as Record<
+                  string,
+                  unknown
+                >).assetTransferMethod;
+                return `${a.scheme}/${a.network}${
+                  method !== undefined ? ` (${String(method)})` : ""
+                }`;
+              }).join(", ") || "none"
             }`,
           );
         }
+        const requirement = chosen.r;
 
         // Enforce the spend ceiling before signing anything.
         const ceilingBase = BigInt(
@@ -572,15 +825,6 @@ export const model = {
           );
         }
 
-        const rawRequirement = (Array.isArray(
-            (challengeBody as Record<string, unknown>).accepts,
-          )
-          ? ((challengeBody as Record<string, unknown>).accepts as unknown[])[
-            accepts.indexOf(requirement)
-          ]
-          : {}) as Record<string, unknown>;
-        const extra = (rawRequirement.extra ?? {}) as Record<string, unknown>;
-
         logger.info(
           "Paying {amount} USDC on {network} to {payTo}",
           {
@@ -590,31 +834,41 @@ export const model = {
           },
         );
 
-        const paymentHeader = await buildPaymentHeader(
+        const signed = await signPayment(
           account,
           requirement,
-          extra,
-          version ?? 1,
+          chosen.raw,
+          envelope,
+          resource,
         );
+        const validBeforeIso = new Date(signed.validBefore * 1000)
+          .toISOString();
+        const audit = {
+          validBefore: validBeforeIso,
+          authorizationNonce: signed.nonce,
+        };
 
-        // Retry with the signed payment authorization. Once X-PAYMENT is
-        // sent the payment may settle, so a timeout from here on must still
-        // leave a payment record (receipt unknown) rather than lose it.
+        // Retry with the signed payment authorization. Once it is sent the
+        // payment may settle, so a timeout from here on must still leave a
+        // payment record (receipt unknown) rather than lose it.
         const paidSignal = AbortSignal.timeout(timeoutSeconds * 1000);
         let paidRes: Response | null = null;
         let receipt: z.infer<typeof PaymentReceiptSchema> | null = null;
+        let refusal: string | null = null;
         let responseBody = "";
         let responseTruncated = false;
         try {
           paidRes = await fetch(args.url, {
             method: args.method,
-            headers: { ...args.headers, "X-PAYMENT": paymentHeader },
+            headers: {
+              ...args.headers,
+              [signed.headerName]: signed.headerValue,
+            },
             body: args.body,
             signal: paidSignal,
           });
-          receipt = decodePaymentResponse(
-            paidRes.headers.get("x-payment-response"),
-          );
+          receipt = decodePaymentResponse(paidRes);
+          refusal = receipt ? null : verifyRefusalReason(paidRes);
           ({ body: responseBody, truncated: responseTruncated } =
             await readCappedBody(paidRes));
         } catch (err) {
@@ -637,6 +891,8 @@ export const model = {
               responseBody: "",
               responseTruncated: false,
               paidAt: new Date().toISOString(),
+              refused: false,
+              ...audit,
             },
           );
           logger.warn(
@@ -644,8 +900,18 @@ export const model = {
             { name: handle.name },
           );
           throw new Error(
-            `Paid retry to ${args.url} timed out after ${timeoutSeconds}s after the X-PAYMENT header was sent — the payment may have settled. Recorded as paid with no receipt in '${args.requestId}'; check the payer's on-chain history before retrying.`,
+            `Paid retry to ${args.url} timed out after ${timeoutSeconds}s after the ${signed.headerName} header was sent — the payment may have settled. Recorded as paid with no receipt in '${args.requestId}'; check the payer's on-chain history before retrying.`,
           );
+        }
+
+        if (refusal !== null) {
+          receipt = {
+            success: false,
+            transaction: null,
+            network: requirement.network,
+            payer: account.address,
+            errorReason: refusal,
+          };
         }
 
         // Record before checking the status: an error response to the paid
@@ -665,7 +931,19 @@ export const model = {
           responseBody,
           responseTruncated,
           paidAt: new Date().toISOString(),
+          refused: refusal !== null,
+          ...audit,
         });
+
+        if (refusal !== null) {
+          logger.warn(
+            "Payment refused at verification ({reason}); recorded as {name}",
+            { reason: refusal, name: handle.name },
+          );
+          throw new Error(
+            `x402 payment to ${args.url} was refused at verification (${paidRes.status}): ${refusal}. The server reported it did not settle. The signed authorization (nonce ${signed.nonce}) stays valid until ${validBeforeIso}; treat it as outstanding until then. Recorded as refused in '${args.requestId}'.`,
+          );
+        }
 
         if (!paidRes.ok) {
           logger.warn(
@@ -677,8 +955,10 @@ export const model = {
             },
           );
           throw new Error(
-            `x402 payment retry failed with ${paidRes.status}: ${responseBody} — the X-PAYMENT header was sent, so the payment may have settled. Recorded as paid in '${args.requestId}' (receipt: ${
+            `x402 payment retry failed with ${paidRes.status}: ${responseBody} — the ${signed.headerName} header was sent, so the payment may have settled. Recorded as paid in '${args.requestId}' (receipt: ${
               receipt?.transaction ?? "none"
+            }${
+              receipt?.errorReason ? `, reason: ${receipt.errorReason}` : ""
             }); check the payer's on-chain history before retrying.`,
           );
         }
@@ -712,6 +992,12 @@ export const model = {
       toVersion: "2026.09.29.3",
       description:
         "a paid retry that returns an error status is recorded as paid (with its status and any receipt) before the method fails; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.10.24.1",
+      description:
+        "x402 v2 support (PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE headers, CAIP-2 networks); payment records gain optional refused, validBefore and authorizationNonce, receipts gain errorReason; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
