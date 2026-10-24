@@ -687,35 +687,80 @@ Deno.test("v2: a malformed PAYMENT-REQUIRED header is reported, not parsed", asy
   assertEquals((data.accepts as unknown[]).length, 0);
 });
 
-Deno.test("v2: a PAYMENT-REQUIRED header without x402Version 2 is refused before signing", async () => {
-  const challenge = { ...SPEC_CHALLENGE } as Record<string, unknown>;
-  delete challenge.x402Version;
-  const { context, getWrittenResources } = probeContext();
-  await withMockedFetch(
-    () => Promise.resolve(v2Challenge(v2Header(challenge))),
-    async () => {
-      await model.methods.probe.execute(
-        {
-          url: "https://api.example.com/premium-data",
-          method: "GET",
-          requestId: "q",
-        },
-        context,
-      );
-    },
-  );
-  assertStringIncludes(
-    String(getWrittenResources()[0].data.error),
-    "only 2 is supported",
-  );
+for (const version of [undefined, 1]) {
+  Deno.test(`v2: a PAYMENT-REQUIRED header with x402Version ${version} is refused before signing`, async () => {
+    const challenge = { ...SPEC_CHALLENGE } as Record<string, unknown>;
+    if (version === undefined) delete challenge.x402Version;
+    else challenge.x402Version = version;
+    const { context, getWrittenResources } = probeContext();
+    await withMockedFetch(
+      () => Promise.resolve(v2Challenge(v2Header(challenge))),
+      async () => {
+        await model.methods.probe.execute(
+          {
+            url: "https://api.example.com/premium-data",
+            method: "GET",
+            requestId: "q",
+          },
+          context,
+        );
+      },
+    );
+    assertStringIncludes(
+      String(getWrittenResources()[0].data.error),
+      "only 2 is supported",
+    );
 
+    const res = await payV2(
+      () => Response.json({}, { status: 200 }),
+      () => v2Challenge(v2Header(challenge)),
+    );
+    assertEquals(res.requests.length, 1);
+    assertEquals(res.written.length, 0);
+    assertStringIncludes(String(res.error), "nothing was signed");
+  });
+}
+
+Deno.test("the price field follows x402Version when an offer carries both", async () => {
+  for (const [version, want] of [[2, "10000"], [1, "20000"]] as const) {
+    const offer = { ...SPEC_CHALLENGE.accepts[0], maxAmountRequired: "20000" };
+    const body = { ...SPEC_CHALLENGE, x402Version: version, accepts: [offer] };
+    const { context, getWrittenResources } = probeContext();
+    await withMockedFetch(
+      () => Promise.resolve(Response.json(body, { status: 402 })),
+      async () => {
+        await model.methods.probe.execute(
+          {
+            url: "https://api.example.com/premium-data",
+            method: "GET",
+            requestId: "q",
+          },
+          context,
+        );
+      },
+    );
+    const accepts = getWrittenResources()[0].data.accepts as Array<
+      Record<string, unknown>
+    >;
+    assertEquals(accepts[0].maxAmountRequired, want, `x402Version ${version}`);
+  }
+});
+
+Deno.test("v2: a signed authorization is valid for at most 300s, whatever the offer asks", async () => {
+  const offer = { ...SPEC_CHALLENGE.accepts[0], maxTimeoutSeconds: 86400 };
+  const challenge = { ...SPEC_CHALLENGE, accepts: [offer] };
+  const before = Math.floor(Date.now() / 1000);
   const res = await payV2(
     () => Response.json({}, { status: 200 }),
     () => v2Challenge(v2Header(challenge)),
   );
-  assertEquals(res.requests.length, 1);
-  assertEquals(res.written.length, 0);
-  assertStringIncludes(String(res.error), "nothing was signed");
+  const after = Math.floor(Date.now() / 1000);
+  assertEquals(res.error, null);
+  const sent = JSON.parse(
+    b64ToUtf8(res.requests[1].headers.get("PAYMENT-SIGNATURE")!),
+  );
+  const validBefore = Number(sent.payload.authorization.validBefore);
+  assertEquals(validBefore >= before + 300 && validBefore <= after + 300, true);
 });
 
 Deno.test("v2: pay sends PAYMENT-SIGNATURE echoing the offer, signed for the spec's domain", async () => {

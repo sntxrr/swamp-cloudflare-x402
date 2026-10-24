@@ -79,6 +79,9 @@ const DEFAULT_TOKEN_DECIMALS = 6;
 /** swamp imposes no method timeout, so every request carries its own. */
 const DEFAULT_TIMEOUT_SECONDS = 30;
 
+/** The longest a signed authorization stays valid, whatever the server asks. */
+const MAX_VALIDITY_SECONDS = 300;
+
 const GlobalArgsSchema = z.object({
   privateKey: z.string().meta({ sensitive: true }).regex(
     /^0x[0-9a-fA-F]{64}$/,
@@ -333,8 +336,15 @@ function parseAccepts(
       topResource.url != null
     ? String(topResource.url)
     : undefined;
+  const version = typeof obj.x402Version === "number" ? obj.x402Version : null;
   const accepts = raws.map((r) => {
-    const maxAmountRequired = String(r.amount ?? r.maxAmountRequired ?? "");
+    // The price field follows x402Version, like the envelope: v2 `amount`,
+    // v1 `maxAmountRequired`, each falling back to the other.
+    const maxAmountRequired = String(
+      (version === 2
+        ? r.amount ?? r.maxAmountRequired
+        : r.maxAmountRequired ?? r.amount) ?? "",
+    );
     return {
       scheme: String(r.scheme ?? ""),
       network: String(r.network ?? ""),
@@ -355,7 +365,7 @@ function parseAccepts(
     };
   });
   return {
-    version: typeof obj.x402Version === "number" ? obj.x402Version : null,
+    version,
     accepts,
     raws,
     resource: obj.resource,
@@ -426,7 +436,10 @@ async function signPayment(
   }
 
   const now = Math.floor(Date.now() / 1000);
-  const validBefore = now + (requirement.maxTimeoutSeconds ?? 60);
+  // The server sets maxTimeoutSeconds, so cap it: a signed authorization stays
+  // spendable until validBefore, and a refused payment stays outstanding.
+  const validBefore = now +
+    Math.min(requirement.maxTimeoutSeconds ?? 60, MAX_VALIDITY_SECONDS);
   const nonce = randomNonce();
   const value = BigInt(requirement.maxAmountRequired);
 
@@ -758,13 +771,14 @@ export const model = {
 
         // The envelope follows the challenge's x402Version, not where the
         // challenge was found. A version we cannot send is refused before
-        // anything is signed.
+        // anything is signed, and so is a PAYMENT-REQUIRED header that is not
+        // v2, which probe reports as an error too.
         let envelope: 1 | 2;
         if (version === 2) {
           envelope = 2;
         } else if (
-          version === 1 ||
-          (version === null && parsedChallenge.source === "body")
+          parsedChallenge.source === "body" &&
+          (version === 1 || version === null)
         ) {
           envelope = 1;
         } else {
@@ -997,7 +1011,7 @@ export const model = {
     {
       toVersion: "2026.10.24.1",
       description:
-        "x402 v2 support (PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE headers, CAIP-2 networks); payment records gain optional refused, validBefore and authorizationNonce, receipts gain errorReason; no globalArguments change",
+        "x402 v2 support (PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE headers, CAIP-2 networks); payment records gain optional refused, validBefore and authorizationNonce, receipts gain errorReason; a signed authorization is valid for at most 300s; the x402-spend report labels networks by CAIP-2 id, so v1 rows read eip155:8453 where they read base (markdown and json.byNetwork); no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

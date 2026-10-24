@@ -255,9 +255,9 @@ export const report = {
       }
       if (refused.length > 0) {
         lines.push(
-          `- **Refused (server-reported):** ${refused.length} payment(s), ${
+          `- **Refused (not confirmed on-chain):** ${refused.length} payment(s), ${
             fmtUsdc(refusedUsdc)
-          } USDC — refused at verification and now expired; not counted as spend.`,
+          } USDC — refused at verification and now expired; not counted as spend (check authorizationNonce on-chain to confirm).`,
         );
       }
     }

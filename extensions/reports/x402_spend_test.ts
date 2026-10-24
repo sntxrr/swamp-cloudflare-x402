@@ -242,7 +242,10 @@ Deno.test("x402-spend shows a refusal as outstanding until validBefore, then ref
   assertEquals(expired.json.outstandingCount, 0);
   assertEquals(expired.json.refusedCount, 1);
   assertEquals(expired.json.refusedUsdc, 0.001);
-  assertStringIncludes(expired.markdown, "**Refused (server-reported):** 1");
+  assertStringIncludes(
+    expired.markdown,
+    "**Refused (not confirmed on-chain):** 1",
+  );
 });
 
 Deno.test("x402-spend still counts a failed settlement that carries a tx", async () => {
