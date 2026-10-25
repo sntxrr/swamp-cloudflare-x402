@@ -18,6 +18,8 @@ const PaymentSchema = z.object({
   amountUsdc: z.number().nullable().optional(),
   paidAt: z.string(),
   receipt: z.object({ success: z.boolean() }).nullable().optional(),
+  refused: z.boolean().optional(),
+  validBefore: z.string().optional(),
 });
 
 type Payment = z.infer<typeof PaymentSchema>;
@@ -47,6 +49,32 @@ type ModelReportContext = {
 };
 
 type Bucket = { requests: number; usdc: number };
+
+/**
+ * v1 x402 network names and their chain IDs, mirrored from the model (a report
+ * is bundled on its own, so it does not import the model and its signer).
+ */
+const V1_NETWORK_CHAIN_IDS: Record<string, number> = {
+  "base": 8453,
+  "base-sepolia": 84532,
+  "avalanche": 43114,
+  "avalanche-fuji": 43113,
+  "polygon": 137,
+  "polygon-amoy": 80002,
+  "sei": 1329,
+  "sei-testnet": 1328,
+};
+
+/**
+ * One label per chain: v1 names become their CAIP-2 id (`base` →
+ * `eip155:8453`), so v1 and v2 spend on one chain share a row.
+ */
+function networkKey(network: string | null | undefined): string {
+  if (!network) return "unknown";
+  return Object.hasOwn(V1_NETWORK_CHAIN_IDS, network)
+    ? `eip155:${V1_NETWORK_CHAIN_IDS[network]}`
+    : network;
+}
 
 /** Format a USDC number with 4 decimals, tolerating null/undefined. */
 function fmtUsdc(value: number | null | undefined): string {
@@ -109,8 +137,30 @@ export const report = {
   ): Promise<{ markdown: string; json: Record<string, unknown> }> => {
     const modelName = context.definition?.name ?? context.modelId;
     const payments = await loadPayments(context);
-    const paid = payments.filter((p) => p.paid);
-    const unpaid = payments.length - paid.length;
+    const now = Date.now();
+    const sent = payments.filter((p) => p.paid);
+    const unpaid = payments.length - sent.length;
+
+    // A payment the server refused at verification is the server's word, not
+    // proof: the signed authorization could still settle until validBefore.
+    // It is outstanding until then, and only afterwards counted as refused.
+    // Neither counts toward spend; both are listed on their own.
+    const refused: Payment[] = [];
+    const outstanding: Payment[] = [];
+    const paid: Payment[] = [];
+    for (const p of sent) {
+      if (p.refused === true) {
+        const expires = p.validBefore ? Date.parse(p.validBefore) : NaN;
+        if (Number.isFinite(expires) && expires <= now) refused.push(p);
+        else outstanding.push(p);
+      } else {
+        paid.push(p);
+      }
+    }
+    const sumUsdc = (ps: Payment[]) =>
+      ps.reduce((acc, p) => acc + (p.amountUsdc ?? 0), 0);
+    const refusedUsdc = sumUsdc(refused);
+    const outstandingUsdc = sumUsdc(outstanding);
 
     let totalUsdc = 0;
     let settled = 0;
@@ -122,7 +172,7 @@ export const report = {
       totalUsdc += usdc;
       if (p.receipt?.success) settled += 1;
 
-      const net = p.network ?? "unknown";
+      const net = networkKey(p.network);
       const n = byNetwork.get(net) ?? { requests: 0, usdc: 0 };
       n.requests += 1;
       n.usdc += usdc;
@@ -145,7 +195,9 @@ export const report = {
     const lines: string[] = [];
     lines.push(`## x402 spend summary — ${modelName}`);
     lines.push("");
-    if (paid.length === 0) {
+    if (paid.length === 0 && refused.length + outstanding.length > 0) {
+      lines.push("No settled x402 spend recorded for this wallet.");
+    } else if (paid.length === 0) {
       lines.push(
         unpaid > 0
           ? `No paid x402 requests yet (${unpaid} request(s) needed no payment).`
@@ -192,6 +244,24 @@ export const report = {
       }
     }
 
+    if (refused.length + outstanding.length > 0) {
+      lines.push("");
+      if (outstanding.length > 0) {
+        lines.push(
+          `- **Outstanding:** ${outstanding.length} payment(s), ${
+            fmtUsdc(outstandingUsdc)
+          } USDC — refused by the server but still settleable until their validBefore; not counted as spend.`,
+        );
+      }
+      if (refused.length > 0) {
+        lines.push(
+          `- **Refused (not confirmed on-chain):** ${refused.length} payment(s), ${
+            fmtUsdc(refusedUsdc)
+          } USDC — refused at verification and now expired; not counted as spend (check authorizationNonce on-chain to confirm).`,
+        );
+      }
+    }
+
     const toObj = (m: Map<string, Bucket>) =>
       Object.fromEntries(
         [...m.entries()].map(
@@ -206,6 +276,10 @@ export const report = {
       json: {
         model: modelName,
         paidRequests: paid.length,
+        refusedCount: refused.length,
+        refusedUsdc: Number(refusedUsdc.toFixed(6)),
+        outstandingCount: outstanding.length,
+        outstandingUsdc: Number(outstandingUsdc.toFixed(6)),
         unpaidRequests: unpaid,
         totalUsdc: Number(totalUsdc.toFixed(6)),
         settledCount: settled,
