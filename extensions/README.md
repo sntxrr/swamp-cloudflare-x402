@@ -116,7 +116,8 @@ A v2 server that **refuses the payment at verification** (a `402` with a fresh
 recorded with `refused: true` and the reason in `receipt.errorReason`. That is
 the server's word, not proof: the signed authorization stays valid until the
 record's `validBefore` (at most 300 s after signing, whatever
-`maxTimeoutSeconds` the server asks), and its `authorizationNonce` lets you
+`maxTimeoutSeconds` the server asks; 60 s when it asks 0 or less, for v1 and v2
+alike), and its `authorizationNonce` lets you
 check its use on-chain. The spend report lists it as **outstanding** until then
 and as **refused (not confirmed on-chain)** after, and counts neither as spend.
 A `PAYMENT-RESPONSE` with `success: false` is not a refusal: it may carry a
@@ -150,8 +151,8 @@ EVM "exact" scheme on: `base`, `base-sepolia`, `avalanche`, `avalanche-fuji`,
 server's advertised `accepts` list; unsupported networks are skipped.
 
 Both x402 transports are supported, and the envelope follows the challenge's
-`x402Version`. **v1** sends the challenge as a JSON body, with network names such
-as `base`, and uses `X-PAYMENT` / `X-PAYMENT-RESPONSE`. **v2** sends it
+`x402Version`. **v1** sends the challenge as a JSON body, with network names
+such as `base`, and uses `X-PAYMENT` / `X-PAYMENT-RESPONSE`. **v2** sends it
 base64-encoded in the `PAYMENT-REQUIRED` header, with CAIP-2 network ids such as
 `eip155:8453`, and uses `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE`. A v2 id is
 accepted only for a chain listed above (`eip155:8453`, `eip155:84532`, …), and

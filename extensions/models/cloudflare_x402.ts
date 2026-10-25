@@ -438,8 +438,11 @@ async function signPayment(
   const now = Math.floor(Date.now() / 1000);
   // The server sets maxTimeoutSeconds, so cap it: a signed authorization stays
   // spendable until validBefore, and a refused payment stays outstanding. A
-  // timeout of 0 or less would sign an already-expired authorization.
-  const asked = requirement.maxTimeoutSeconds;
+  // timeout of 0 or less would sign an already-expired authorization, and a
+  // fractional one cannot be signed as a uint256.
+  const asked = requirement.maxTimeoutSeconds === undefined
+    ? undefined
+    : Math.floor(requirement.maxTimeoutSeconds);
   const validBefore = now +
     Math.min(
       asked !== undefined && asked > 0 ? asked : 60,
@@ -1016,7 +1019,7 @@ export const model = {
     {
       toVersion: "2026.10.24.1",
       description:
-        "x402 v2 support (PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE headers, CAIP-2 networks); payment records gain optional refused, validBefore and authorizationNonce, receipts gain errorReason; a signed authorization is valid for at most 300s; the x402-spend report labels networks by CAIP-2 id, so v1 rows read eip155:8453 where they read base (markdown and json.byNetwork); no globalArguments change",
+        "x402 v2 support (PAYMENT-REQUIRED / PAYMENT-SIGNATURE / PAYMENT-RESPONSE headers, CAIP-2 networks); payment records gain optional refused, validBefore and authorizationNonce, receipts gain errorReason; a signed authorization is valid for at most 300s, and for 60s when the offer asks 0 or less (v1 and v2 alike); the x402-spend report labels networks by CAIP-2 id, so v1 rows read eip155:8453 where they read base (markdown and json.byNetwork); no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

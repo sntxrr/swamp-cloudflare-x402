@@ -747,8 +747,11 @@ Deno.test("the price field follows x402Version when an offer carries both", asyn
 });
 
 // The offer's maxTimeoutSeconds and the validity it must be signed for: capped
-// at 300s, and a timeout of 0 or less falls back to 60s, not already expired.
-for (const [asked, want] of [[86400, 300], [0, 60], [-5, 60]] as const) {
+// at 300s, a fraction is rounded down to whole seconds, and a timeout of 0 or
+// less falls back to 60s, not already expired.
+for (
+  const [asked, want] of [[86400, 300], [59.5, 59], [0, 60], [-5, 60]] as const
+) {
   Deno.test(`v2: an offer asking ${asked}s is signed valid for ${want}s`, async () => {
     const offer = { ...SPEC_CHALLENGE.accepts[0], maxTimeoutSeconds: asked };
     const challenge = { ...SPEC_CHALLENGE, accepts: [offer] };
