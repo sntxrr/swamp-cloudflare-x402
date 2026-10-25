@@ -113,13 +113,13 @@ the spend report counts it as spent.
 
 A v2 server that **refuses the payment at verification** (a `402` with a fresh
 `PAYMENT-REQUIRED` header naming the reason, and no `PAYMENT-RESPONSE`) is
-recorded with `refused: true` and the reason in `receipt.errorReason`. That is the
-server's word, not proof: the signed authorization stays valid until the
+recorded with `refused: true` and the reason in `receipt.errorReason`. That is
+the server's word, not proof: the signed authorization stays valid until the
 record's `validBefore` (at most 300 s after signing, whatever
-`maxTimeoutSeconds` the server asks), and its `authorizationNonce` lets you check its use
-on-chain. The spend report lists it as **outstanding** until then and as
-**refused (not confirmed on-chain)** after, and counts neither as spend. A
-`PAYMENT-RESPONSE` with `success: false` is not a refusal: it may carry a
+`maxTimeoutSeconds` the server asks), and its `authorizationNonce` lets you
+check its use on-chain. The spend report lists it as **outstanding** until then
+and as **refused (not confirmed on-chain)** after, and counts neither as spend.
+A `PAYMENT-RESPONSE` with `success: false` is not a refusal: it may carry a
 broadcast transaction, so it stays an unconfirmed settlement that counts as
 spend.
 
@@ -131,9 +131,10 @@ A model-scope report bundled with this extension. It runs automatically after
 the wallet model's method executions and summarizes spend from the stored
 `payment` receipts: total USDC, a per-network and per-resource breakdown, the
 on-chain settlement rate, and counts of unpaid / unconfirmed requests. Networks
-are labelled by CAIP-2 id (`base` and `eip155:8453` share one row; before 2026.10.24.1 v1 rows read
-`base`, in the markdown and `json.byNetwork`); payments a
-server refused at verification are listed apart and not counted as spend.
+are labelled by CAIP-2 id (`base` and `eip155:8453` share one row; before
+2026.10.24.1 v1 rows read `base`, in the markdown and `json.byNetwork`);
+payments a server refused at verification are listed apart and not counted as
+spend.
 
 ```bash
 swamp report get @sntxrr/x402-spend --model my-wallet --json

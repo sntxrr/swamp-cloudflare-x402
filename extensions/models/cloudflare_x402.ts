@@ -437,9 +437,14 @@ async function signPayment(
 
   const now = Math.floor(Date.now() / 1000);
   // The server sets maxTimeoutSeconds, so cap it: a signed authorization stays
-  // spendable until validBefore, and a refused payment stays outstanding.
+  // spendable until validBefore, and a refused payment stays outstanding. A
+  // timeout of 0 or less would sign an already-expired authorization.
+  const asked = requirement.maxTimeoutSeconds;
   const validBefore = now +
-    Math.min(requirement.maxTimeoutSeconds ?? 60, MAX_VALIDITY_SECONDS);
+    Math.min(
+      asked !== undefined && asked > 0 ? asked : 60,
+      MAX_VALIDITY_SECONDS,
+    );
   const nonce = randomNonce();
   const value = BigInt(requirement.maxAmountRequired);
 

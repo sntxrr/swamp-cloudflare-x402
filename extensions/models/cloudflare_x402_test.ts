@@ -746,22 +746,30 @@ Deno.test("the price field follows x402Version when an offer carries both", asyn
   }
 });
 
-Deno.test("v2: a signed authorization is valid for at most 300s, whatever the offer asks", async () => {
-  const offer = { ...SPEC_CHALLENGE.accepts[0], maxTimeoutSeconds: 86400 };
-  const challenge = { ...SPEC_CHALLENGE, accepts: [offer] };
-  const before = Math.floor(Date.now() / 1000);
-  const res = await payV2(
-    () => Response.json({}, { status: 200 }),
-    () => v2Challenge(v2Header(challenge)),
-  );
-  const after = Math.floor(Date.now() / 1000);
-  assertEquals(res.error, null);
-  const sent = JSON.parse(
-    b64ToUtf8(res.requests[1].headers.get("PAYMENT-SIGNATURE")!),
-  );
-  const validBefore = Number(sent.payload.authorization.validBefore);
-  assertEquals(validBefore >= before + 300 && validBefore <= after + 300, true);
-});
+// The offer's maxTimeoutSeconds and the validity it must be signed for: capped
+// at 300s, and a timeout of 0 or less falls back to 60s, not already expired.
+for (const [asked, want] of [[86400, 300], [0, 60], [-5, 60]] as const) {
+  Deno.test(`v2: an offer asking ${asked}s is signed valid for ${want}s`, async () => {
+    const offer = { ...SPEC_CHALLENGE.accepts[0], maxTimeoutSeconds: asked };
+    const challenge = { ...SPEC_CHALLENGE, accepts: [offer] };
+    const before = Math.floor(Date.now() / 1000);
+    const res = await payV2(
+      () => Response.json({}, { status: 200 }),
+      () => v2Challenge(v2Header(challenge)),
+    );
+    const after = Math.floor(Date.now() / 1000);
+    assertEquals(res.error, null);
+    const sent = JSON.parse(
+      b64ToUtf8(res.requests[1].headers.get("PAYMENT-SIGNATURE")!),
+    );
+    const validBefore = Number(sent.payload.authorization.validBefore);
+    assertEquals(
+      validBefore >= before + want && validBefore <= after + want,
+      true,
+      `validBefore ${validBefore - before}s after signing`,
+    );
+  });
+}
 
 Deno.test("v2: pay sends PAYMENT-SIGNATURE echoing the offer, signed for the spec's domain", async () => {
   const res = await payV2(() =>

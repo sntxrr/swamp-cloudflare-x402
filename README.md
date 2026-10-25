@@ -65,11 +65,11 @@ swamp report get @sntxrr/x402-spend --model my-wallet --json     # structured
 
 It reports total USDC spent, a per-network and per-resource breakdown, the
 on-chain settlement rate, and counts of unpaid / unconfirmed requests. Networks
-are labelled by CAIP-2 id, so v1 `base` and v2 `eip155:8453` spend share one row. Before 2026.10.24.1 v1
-rows were labelled `base`; they now read `eip155:8453`, in the markdown and
-`json.byNetwork`.
-Payments a server refused at verification are listed apart, as outstanding or
-refused, and not counted as spend. Example:
+are labelled by CAIP-2 id, so v1 `base` and v2 `eip155:8453` spend share one
+row. Before 2026.10.24.1 v1 rows were labelled `base`; they now read
+`eip155:8453`, in the markdown and `json.byNetwork`. Payments a server refused
+at verification are listed apart, as outstanding or refused, and not counted as
+spend. Example:
 
 ```
 ## x402 spend summary — my-wallet
@@ -103,13 +103,13 @@ skipped.
 
 A v2 server that **refuses the payment at verification** (a `402` with a fresh
 `PAYMENT-REQUIRED` header naming the reason, and no `PAYMENT-RESPONSE`) is
-recorded with `refused: true` and the reason in `receipt.errorReason`. That is the
-server's word, not proof: the signed authorization stays valid until the
+recorded with `refused: true` and the reason in `receipt.errorReason`. That is
+the server's word, not proof: the signed authorization stays valid until the
 record's `validBefore` (at most 300 s after signing, whatever
-`maxTimeoutSeconds` the server asks), and its `authorizationNonce` lets you check its use
-on-chain. The spend report lists it as **outstanding** until then and as
-**refused (not confirmed on-chain)** after, and counts neither as spend. A
-`PAYMENT-RESPONSE` with `success: false` is not a refusal: it may carry a
+`maxTimeoutSeconds` the server asks), and its `authorizationNonce` lets you
+check its use on-chain. The spend report lists it as **outstanding** until then
+and as **refused (not confirmed on-chain)** after, and counts neither as spend.
+A `PAYMENT-RESPONSE` with `success: false` is not a refusal: it may carry a
 broadcast transaction, so it stays an unconfirmed settlement that counts as
 spend.
 
